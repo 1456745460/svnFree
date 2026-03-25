@@ -1,0 +1,42 @@
+# Python 虚拟环境
+venv/
+.venv/
+env/
+
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyc
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec.bak
+
+# 分发包
+*.egg-info/
+*.egg
+dist/
+
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# 日志文件
+*.log
