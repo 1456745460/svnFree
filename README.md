@@ -457,14 +457,4 @@ brew install subversion
 
 ---
 
-### Q: Finder 右键菜单中看不到 SVN 选项？
-
-**A:** 请执行以下步骤：
-1. 确认已运行 `python3 install_finder_service.py` 安装服务
-2. 打开 **系统设置 → 隐私与安全性 → 扩展 → Finder 扩展**
-3. 确认 SVNFree 相关的 Quick Action 已勾选启用
-4. 重启 Finder：`killall Finder`
-
----
-
 *SVNFree v1.0.0 | 基于 Python + PyQt6 开发 | 仅支持 macOS*
