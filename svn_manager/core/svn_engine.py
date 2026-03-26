@@ -504,6 +504,73 @@ class SVNEngine:
         rc, out, err = self._run(args, timeout=30)
         return rc == 0, out + err
 
+    def get_conflict_files(self, path: str) -> list["SVNFileStatus"]:
+        """返回指定工作副本中所有冲突状态的文件"""
+        all_status = self.get_status(path)
+        return [s for s in all_status if s.status == SVNStatus.CONFLICTED]
+
+    def get_conflict_versions(self, path: str) -> dict:
+        """获取冲突文件对应的三个版本内容：mine/theirs/base。
+        SVN 冲突时会产生三个附属文件：
+          .mine    -> 本地修改版本
+          .rOLDREV -> base（公共祖先）版本
+          .rNEWREV -> theirs（服务器最新）版本
+        返回 {
+            'mine':   (file_path, content_str),
+            'base':   (file_path, content_str),
+            'theirs': (file_path, content_str),
+            'working': (file_path, content_str),
+        }
+        """
+        import glob
+        result = {}
+
+        # 当前工作文件
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", errors="replace") as f:
+                    result["working"] = (path, f.read())
+            except Exception:
+                result["working"] = (path, "")
+
+        # 查找 SVN 冲突附属文件
+        dir_path = os.path.dirname(path)
+        base_name = os.path.basename(path)
+
+        # .mine 文件
+        mine_path = path + ".mine"
+        if os.path.isfile(mine_path):
+            try:
+                with open(mine_path, "r", errors="replace") as f:
+                    result["mine"] = (mine_path, f.read())
+            except Exception:
+                result["mine"] = (mine_path, "")
+
+        # .rXXX 文件（base 版本为旧版本号，theirs 为新版本号）
+        r_files = sorted(glob.glob(os.path.join(dir_path, base_name + ".r[0-9]*")))
+        if len(r_files) >= 2:
+            # 版本号较小的是 base，较大的是 theirs
+            def _rev_num(p):
+                try:
+                    return int(os.path.basename(p).rsplit(".r", 1)[1])
+                except Exception:
+                    return 0
+            r_files.sort(key=_rev_num)
+            for label, fpath in [("base", r_files[0]), ("theirs", r_files[-1])]:
+                try:
+                    with open(fpath, "r", errors="replace") as f:
+                        result[label] = (fpath, f.read())
+                except Exception:
+                    result[label] = (fpath, "")
+        elif len(r_files) == 1:
+            try:
+                with open(r_files[0], "r", errors="replace") as f:
+                    result["base"] = (r_files[0], f.read())
+            except Exception:
+                result["base"] = (r_files[0], "")
+
+        return result
+
     def lock(self, paths: list[str], message: str = "",
              force: bool = False,
              username: str = None, password: str = None,

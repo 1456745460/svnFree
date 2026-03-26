@@ -35,6 +35,7 @@ from .properties_dialog import PropertiesDialog
 from .working_copy_browser import WorkingCopyBrowser
 from .file_icons import get_ui_icon, get_file_icon
 from .auth_dialog import AuthDialog
+from .conflict_dialog import ConflictDialog
 
 
 class StatusWorker(QThread):
@@ -280,6 +281,8 @@ class MainWindow(QMainWindow):
         self._act(wc_menu, "提交...", self._do_commit, "Ctrl+Return")
         wc_menu.addSeparator()
         self._act(wc_menu, "还原...", self._do_revert, "Ctrl+Z")
+        wc_menu.addSeparator()
+        self._act(wc_menu, "解决冲突...", self._do_resolve_conflict, "Ctrl+Shift+R")
         wc_menu.addSeparator()
         self._act(wc_menu, "添加文件", self._do_add)
         self._act(wc_menu, "删除文件", self._do_delete)
@@ -603,6 +606,38 @@ class MainWindow(QMainWindow):
         dlg = DiffViewer(path, blame_text, self, title="Blame")
         dlg.exec()
 
+    def _do_resolve_conflict(self):
+        """打开冲突解决对话框。
+        优先取浏览器中选中的冲突文件；若未选中则扫描整个工作副本的冲突文件。
+        """
+        path = self._current_path
+        if not path:
+            return
+
+        # 优先用浏览器已选中的路径（单个文件）
+        selected = self.wc_browser.get_selected_paths()
+        conflict_path = None
+
+        if selected:
+            # 检查选中项是否为冲突文件
+            conflict_path = selected[0]
+        else:
+            # 扫描工作副本，找第一个冲突文件
+            conflicts = self.engine.get_conflict_files(path)
+            if not conflicts:
+                QMessageBox.information(self, "无冲突", "当前工作副本中没有冲突文件。")
+                return
+            conflict_path = conflicts[0].path
+
+        if not conflict_path or not os.path.isfile(conflict_path):
+            QMessageBox.warning(self, "无法解决冲突",
+                                "请在文件列表中选择一个冲突文件后再执行此操作。")
+            return
+
+        dlg = ConflictDialog(self.engine, conflict_path, self)
+        dlg.resolved.connect(lambda _: self._refresh_current())
+        dlg.exec()
+
     def _do_lock(self):
         paths = self.wc_browser.get_selected_paths()
         if not paths:
@@ -706,6 +741,7 @@ class MainWindow(QMainWindow):
             "properties": self._do_properties,
             "lock":    self._do_lock,
             "blame":   self._do_blame,
+            "resolve_conflict": self._do_resolve_conflict,
         }
         if action == "cleanup":
             self._do_cleanup(paths[0] if paths else None)

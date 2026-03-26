@@ -636,6 +636,14 @@ class WorkingCopyBrowser(QWidget):
             act.triggered.connect(lambda: self.action_requested.emit("blame", paths))
             menu.addSeparator()
 
+        # 冲突文件专属菜单
+        has_conflict = any(
+            fs and fs.status == SVNStatus.CONFLICTED for fs in fs_list)
+        if has_conflict:
+            act = menu.addAction(get_ui_icon("conflict", "#f38ba8"), "解决冲突...")
+            act.triggered.connect(lambda: self.action_requested.emit("resolve_conflict", paths))
+            menu.addSeparator()
+
         act = menu.addAction(get_ui_icon("commit"),  "提交...")
         act.triggered.connect(lambda: self.action_requested.emit("commit", paths))
         act = menu.addAction(get_ui_icon("update"),  "更新")

@@ -261,6 +261,11 @@ _UI_ICON_MAP: dict[str, tuple[str, str]] = {
     # 侧边栏 / 欢迎页
     "welcome":     ("mdi6.source-branch-check",      "#89b4fa"),
     "repo_item":   ("mdi6.source-repository",        "#89b4fa"),
+    # 冲突解决
+    "conflict":        ("mdi6.alert-circle-outline",     "#f38ba8"),
+    "accept_mine":     ("mdi6.account-check-outline",    "#a6e3a1"),
+    "accept_theirs":   ("mdi6.cloud-download-outline",   "#89b4fa"),
+    "accept_working":  ("mdi6.file-check-outline",       "#f9e2af"),
 }
 
 
