@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from .theme import MAIN_STYLE
 from ..core.svn_engine import SVNEngine
+from ..utils.helpers import shorten_path
 
 # 认证错误关键字（小写匹配）
 _AUTH_KEYWORDS = [
@@ -55,7 +56,8 @@ class UpdateDialog(QDialog):
         self.path = path
         self._worker = None
         self.setWindowTitle("更新工作副本")
-        self.setMinimumWidth(480)
+        self.setMinimumSize(760, 520)
+        self.resize(900, 620)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
@@ -64,9 +66,11 @@ class UpdateDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel(f"更新: {self.path}")
+        title = QLabel(f"更新: {shorten_path(self.path, 96)}")
         title.setStyleSheet("font-size:12px;color:#89b4fa;")
-        title.setWordWrap(True)
+        title.setWordWrap(False)
+        title.setToolTip(self.path)
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(title)
 
         form = QFormLayout()
@@ -82,7 +86,9 @@ class UpdateDialog(QDialog):
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-        self.output.setMinimumHeight(120)
+        self.output.setMinimumHeight(320)
+        self.output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.output.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.output.setPlaceholderText("更新输出将显示在这里...")
         self.output.setStyleSheet(
             "background:#111117;color:#cdd6f4;border:1px solid #313244;"
