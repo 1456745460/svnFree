@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-scale-factor",
+    "core:window:allow-outer-position",
+    "core:window:allow-is-maximized",
+    "core:window:allow-outer-size",
+    "core:window:allow-unmaximize",
+    "opener:default",
+    "core:window:allow-set-focus",
+    "core:window:allow-inner-size",
+    "shell:allow-open",
+    "core:window:allow-available-monitors",
+    "core:window:allow-current-monitor",
+    "core:window:allow-maximize",
+    "core:window:allow-primary-monitor",
+    "dialog:default",
+    "fs:default"
+  ]
+}
