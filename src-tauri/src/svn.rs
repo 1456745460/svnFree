@@ -8,6 +8,60 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use tauri::{AppHandle, Emitter};
 
+/// GUI/LaunchServices 启动时通常没有有效 UTF-8 locale，Subversion 会把非 ASCII
+/// 路径转成 `{U+XXXX}` 形式。强制给 svn 子进程设置 UTF-8 区域设置，并在解析时
+/// 兼容解码这类转义，确保中文文件名正常显示。
+fn apply_svn_locale(cmd: &mut Command) {
+    // C.UTF-8 / en_US.UTF-8 在 macOS 均可用；优先 C.UTF-8，行为更接近无翻译的 C。
+    const LANG: &str = "C.UTF-8";
+    cmd.env("LANG", LANG);
+    cmd.env("LC_ALL", LANG);
+    cmd.env("LC_CTYPE", LANG);
+    cmd.env("LC_MESSAGES", LANG);
+}
+
+fn decode_svn_unicode_escapes(input: &str) -> String {
+    // svn 在非 UTF-8 locale 下会输出: {U+4F1A}{U+5458}...
+    if !input.contains("{U+") {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{'
+            && i + 3 < bytes.len()
+            && bytes[i + 1] == b'U'
+            && bytes[i + 2] == b'+'
+        {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j > i + 3 && j < bytes.len() && bytes[j] == b'}' {
+                if let Ok(hex) = std::str::from_utf8(&bytes[i + 3..j]) {
+                    if let Ok(code) = u32::from_str_radix(hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // 普通字符按 UTF-8 边界推进
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn normalize_svn_text(input: &str) -> String {
+    decode_svn_unicode_escapes(input)
+}
+
 fn svn_binary() -> &'static str {
     static SVN_BIN: OnceLock<String> = OnceLock::new();
     SVN_BIN.get_or_init(|| {
@@ -153,6 +207,7 @@ fn run_svn(args: &[&str], cwd: Option<&Path>) -> Result<CommandResult, String> {
     let svn = svn_binary();
     let mut cmd = Command::new(svn);
     cmd.args(args);
+    apply_svn_locale(&mut cmd);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -163,8 +218,8 @@ fn run_svn(args: &[&str], cwd: Option<&Path>) -> Result<CommandResult, String> {
         )
     })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = normalize_svn_text(&String::from_utf8_lossy(&output.stdout));
+    let stderr = normalize_svn_text(&String::from_utf8_lossy(&output.stderr));
     let code = output.status.code();
     let success = output.status.success();
 
@@ -185,7 +240,8 @@ fn emit_progress(app: &AppHandle, event: SvnProgressEvent) {
 }
 
 fn sanitize_log_line(line: &str) -> String {
-    line.chars()
+    normalize_svn_text(line)
+        .chars()
         .filter(|c| {
             let u = *c as u32;
             // 保留常见空白，去掉控制符（含 EOT/^D、BEL 等）
@@ -346,6 +402,7 @@ fn run_svn_streaming(
     }
     // 尽量关闭环境层额外缓冲
     cmd.env("PYTHONUNBUFFERED", "1");
+    apply_svn_locale(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -583,7 +640,8 @@ fn parse_status_map(stdout: &str) -> std::collections::HashMap<String, String> {
         if code == ' ' || code == '\t' {
             continue;
         }
-        let path_part: String = chars[8..].iter().collect::<String>().trim().to_string();
+        let path_part: String =
+            normalize_svn_text(&chars[8..].iter().collect::<String>().trim().to_string());
         if path_part.is_empty() {
             continue;
         }
@@ -769,7 +827,8 @@ fn parse_status_items(stdout: &str, cwd: &Path) -> Vec<SvnStatusItem> {
                 continue;
             }
         }
-        let path_part: String = chars[8..].iter().collect::<String>().trim().to_string();
+        let path_part: String =
+            normalize_svn_text(&chars[8..].iter().collect::<String>().trim().to_string());
         if path_part.is_empty() {
             continue;
         }
@@ -1482,6 +1541,7 @@ fn svn_cat_revision(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), Str
     let path_str = path.to_string_lossy().to_string();
     let mut cmd = Command::new(svn);
     cmd.args(["cat", "-r", rev, &path_str]);
+    apply_svn_locale(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = cmd.output().map_err(|e| format!("执行 svn cat 失败: {e}"))?;
     if !output.status.success() {
@@ -1725,4 +1785,26 @@ pub fn diff_file_content(path: String) -> Result<DiffFileContent, String> {
 pub fn is_svn_working_copy(path: String) -> Result<bool, String> {
     let p = PathBuf::from(path);
     Ok(p.is_dir() && p.join(".svn").exists())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_svn_unicode_path_escapes() {
+        let escaped =
+            "java/{U+4F1A}{U+5458}{U+4FE1}{U+606F}{U+7F16}{U+8F91}{U+9875}{U+9762}{U+89D2}{U+8272}{U+5BF9}{U+7167}.md";
+        assert_eq!(
+            decode_svn_unicode_escapes(escaped),
+            "java/会员信息编辑页面角色对照.md"
+        );
+    }
+
+    #[test]
+    fn decode_leaves_plain_utf8_paths() {
+        let plain = "java/会员信息编辑页面角色对照.md";
+        assert_eq!(decode_svn_unicode_escapes(plain), plain);
+    }
 }
