@@ -1,23 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import hljs from "highlight.js/lib/core";
-import javascript from "highlight.js/lib/languages/javascript";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import json from "highlight.js/lib/languages/json";
-import css from "highlight.js/lib/languages/css";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import java from "highlight.js/lib/languages/java";
-import go from "highlight.js/lib/languages/go";
-import bash from "highlight.js/lib/languages/bash";
-import markdown from "highlight.js/lib/languages/markdown";
-import sql from "highlight.js/lib/languages/sql";
-import yaml from "highlight.js/lib/languages/yaml";
-import cpp from "highlight.js/lib/languages/cpp";
-import csharp from "highlight.js/lib/languages/csharp";
-import ruby from "highlight.js/lib/languages/ruby";
-import php from "highlight.js/lib/languages/php";
 import * as api from "../api/svn";
 import type { DiffFileContent, DiffFileInfo, DiffViewMode } from "../types";
 import {
@@ -35,24 +17,7 @@ import {
   type BuiltDiff,
   type UnifiedRow,
 } from "../utils/diffEngine";
-
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("java", java);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("yaml", yaml);
-hljs.registerLanguage("cpp", cpp);
-hljs.registerLanguage("csharp", csharp);
-hljs.registerLanguage("ruby", ruby);
-hljs.registerLanguage("php", php);
+import { highlightCode } from "../utils/codeHighlight";
 
 const props = defineProps<{
   rootPath: string;
@@ -194,11 +159,15 @@ function highlightSourceToLineHtml(text: string, language: string): string[] {
     // keep consistent with diffLines splitting
   }
   const lang = resolveHighlightLang(language);
-  if (!lang || !hljs.getLanguage(lang)) {
+  if (!lang) {
     return lines.map((line) => escapeHtml(line));
   }
   try {
-    const highlighted = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+    const highlighted = highlightCode(text, language);
+    // highlightCode already escapes when language is unsupported
+    if (!highlighted.includes("<span") && highlighted === escapeHtml(text)) {
+      return lines.map((line) => escapeHtml(line));
+    }
     return splitHighlightedHtmlLinesWithTags(highlighted, lines.length);
   } catch {
     return lines.map((line) => escapeHtml(line));

@@ -36,6 +36,113 @@ const preview = ref<PreviewPayload | null>(null);
 const viewMode = ref<ViewMode>("columns");
 const busy = ref(false);
 const previewBusy = ref(false);
+
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 480;
+const PREVIEW_MIN = 240;
+const PREVIEW_MAX = 720;
+const PREVIEW_COLLAPSED_WIDTH = 42;
+const CENTER_MIN = 320;
+const RESIZER_WIDTH = 6;
+
+function readLayoutPref(key: string, fallback: string) {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLayoutPref(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
+}
+
+const sidebarWidth = ref(clamp(Number(readLayoutPref("sf.layout.sidebarWidth", "250")) || 250, SIDEBAR_MIN, SIDEBAR_MAX));
+const previewWidth = ref(clamp(Number(readLayoutPref("sf.layout.previewWidth", "340")) || 340, PREVIEW_MIN, PREVIEW_MAX));
+const previewCollapsed = ref(readLayoutPref("sf.layout.previewCollapsed", "1") !== "0");
+
+const shellStyle = computed(() => {
+  const right = previewCollapsed.value ? PREVIEW_COLLAPSED_WIDTH : previewWidth.value;
+  return {
+    "--sidebar-width": `${sidebarWidth.value}px`,
+    "--preview-width": `${right}px`,
+    "--resizer-width": `${RESIZER_WIDTH}px`,
+  } as Record<string, string>;
+});
+
+function persistLayoutPrefs() {
+  writeLayoutPref("sf.layout.sidebarWidth", String(sidebarWidth.value));
+  writeLayoutPref("sf.layout.previewWidth", String(previewWidth.value));
+  writeLayoutPref("sf.layout.previewCollapsed", previewCollapsed.value ? "1" : "0");
+}
+
+function togglePreviewCollapsed() {
+  previewCollapsed.value = !previewCollapsed.value;
+  persistLayoutPrefs();
+}
+
+function onSidebarResizeStart(e: MouseEvent) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startW = sidebarWidth.value;
+  document.body.classList.add("is-resizing-layout");
+
+  const onMove = (ev: MouseEvent) => {
+    const shell = document.querySelector(".app-shell") as HTMLElement | null;
+    const total = shell?.clientWidth || window.innerWidth;
+    const right = previewCollapsed.value ? PREVIEW_COLLAPSED_WIDTH : previewWidth.value;
+    const maxByCenter = total - right - RESIZER_WIDTH * 2 - CENTER_MIN;
+    const max = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, maxByCenter));
+    sidebarWidth.value = clamp(startW + (ev.clientX - startX), SIDEBAR_MIN, max);
+  };
+
+  const onUp = () => {
+    document.body.classList.remove("is-resizing-layout");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    persistLayoutPrefs();
+  };
+
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
+function onPreviewResizeStart(e: MouseEvent) {
+  if (e.button !== 0 || previewCollapsed.value) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startW = previewWidth.value;
+  document.body.classList.add("is-resizing-layout");
+
+  const onMove = (ev: MouseEvent) => {
+    const shell = document.querySelector(".app-shell") as HTMLElement | null;
+    const total = shell?.clientWidth || window.innerWidth;
+    const maxByCenter = total - sidebarWidth.value - RESIZER_WIDTH * 2 - CENTER_MIN;
+    const max = Math.max(PREVIEW_MIN, Math.min(PREVIEW_MAX, maxByCenter));
+    // 拖左边分割线：向右拖应变窄
+    previewWidth.value = clamp(startW - (ev.clientX - startX), PREVIEW_MIN, max);
+  };
+
+  const onUp = () => {
+    document.body.classList.remove("is-resizing-layout");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    persistLayoutPrefs();
+  };
+
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
 const statusText = ref("就绪");
 const toasts = ref<ToastMessage[]>([]);
 let toastSeq = 1;
@@ -1002,26 +1109,46 @@ async function runAction(action: ContextAction) {
     return;
   }
 
-  if (action === "remove") {
+  if (action === "localDelete" || action === "svnDelete") {
+    const isLocal = action === "localDelete";
     const ok = window.confirm(
       multi
-        ? `确认移除选中的 ${paths.length} 项？\n${summarizePaths(paths)}\n\n将执行 svn delete（必要时回退本地删除）。`
-        : `确认移除？\n${path}\n\n将执行 svn delete（必要时回退本地删除）。`,
+        ? `确认${isLocal ? "本地删除" : "SVN 删除"}选中的 ${paths.length} 项？\n${summarizePaths(paths)}\n\n${
+            isLocal
+              ? "将直接从磁盘删除本地文件/文件夹（不会执行 svn delete）。"
+              : "将执行 svn delete，标记为版本库删除（需提交后才会从仓库移除）。"
+          }`
+        : `确认${isLocal ? "本地删除" : "SVN 删除"}？\n${path}\n\n${
+            isLocal
+              ? "将直接从磁盘删除本地文件/文件夹（不会执行 svn delete）。"
+              : "将执行 svn delete，标记为版本库删除（需提交后才会从仓库移除）。"
+          }`,
     );
     if (!ok) return;
     const res = await withBusy(async () => {
       const outputs: string[] = [];
       let allOk = true;
       for (const p of paths) {
-        const r = await api.svnDelete(p, true);
+        const r = isLocal ? await api.localDelete(p) : await api.svnDelete(p, true);
         allOk = allOk && r.success;
         const chunk = [r.stdout, r.stderr].filter(Boolean).join("\n");
         if (chunk) outputs.push(`# ${p}\n${chunk}`);
+        if (!r.success && !chunk) outputs.push(`# ${p}\n删除失败`);
       }
       return { success: allOk, stdout: outputs.join("\n\n"), stderr: "", code: allOk ? 0 : 1 };
-    }, multi ? `移除 ${paths.length} 项...` : "移除中...");
+    }, multi ? `${isLocal ? "本地删除" : "SVN 删除"} ${paths.length} 项...` : `${isLocal ? "本地删除" : "SVN 删除"}中...`);
     if (res) {
-      toast(multi ? `已处理移除 ${paths.length} 项` : "已移除", "success");
+      if (!res.success) {
+        showOutput(isLocal ? "本地删除结果" : "SVN 删除结果", res.stdout || "删除失败");
+      }
+      toast(
+        multi
+          ? `已处理${isLocal ? "本地删除" : "SVN 删除"} ${paths.length} 项`
+          : isLocal
+            ? "已本地删除"
+            : "已标记 SVN 删除",
+        res.success ? "success" : "error",
+      );
       selectedEntry.value = null;
       selectedPaths.value = [];
       selectionAnchorPath.value = null;
@@ -1437,6 +1564,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  document.body.classList.remove("is-resizing-layout");
   window.removeEventListener("keydown", onGlobalKeydown);
   if (progressUnlisten) {
     progressUnlisten();
@@ -1446,7 +1574,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'preview-collapsed': previewCollapsed }" :style="shellStyle">
     <Sidebar
       :workspaces="workspaces"
       :active-id="activeId"
@@ -1455,6 +1583,12 @@ onUnmounted(() => {
       @add="onAddWorkspace"
       @checkout="openCheckoutModal"
       @context="onWorkspaceContext"
+    />
+
+    <div
+      class="layout-resizer layout-resizer-sidebar"
+      title="拖拽调整工作副本宽度"
+      @mousedown="onSidebarResizeStart"
     />
 
     <FileExplorer
@@ -1479,7 +1613,19 @@ onUnmounted(() => {
       @copy-failed="(msg) => toast(msg || '复制失败', 'error')"
     />
 
-    <PreviewPanel :preview="preview" :busy="previewBusy" />
+    <div
+      class="layout-resizer layout-resizer-preview"
+      :class="{ disabled: previewCollapsed }"
+      :title="previewCollapsed ? '预览区已收起' : '拖拽调整预览区宽度'"
+      @mousedown="onPreviewResizeStart"
+    />
+
+    <PreviewPanel
+      :preview="preview"
+      :busy="previewBusy"
+      :collapsed="previewCollapsed"
+      @toggle-collapse="togglePreviewCollapsed"
+    />
 
     <div class="status-bar">
       <div>{{ statusText }}</div>

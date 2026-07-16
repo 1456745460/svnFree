@@ -90,6 +90,10 @@ export function svnRevert(path: string) {
   return invoke<CommandResult>("svn_revert", { path });
 }
 
+export function localDelete(path: string) {
+  return invoke<CommandResult>("local_delete", { path });
+}
+
 export function svnDelete(path: string, force = true) {
   return invoke<CommandResult>("svn_delete", { path, force });
 }

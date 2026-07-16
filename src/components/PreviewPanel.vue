@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { PreviewPayload } from "../types";
+import { guessLanguageFromPath, highlightCodeFromPath } from "../utils/codeHighlight";
 
 const props = defineProps<{
   preview: PreviewPayload | null;
   busy: boolean;
+  collapsed?: boolean;
+}>();
+
+const emit = defineEmits<{
+  "toggle-collapse": [];
 }>();
 
 const lightboxOpen = ref(false);
@@ -147,6 +153,18 @@ const imgStyle = computed(() => ({
   cursor: scale.value > 1.01 ? (dragging.value ? "grabbing" : "grab") : "default",
 }));
 
+const textLanguage = computed(() => {
+  if (!(props.preview?.kind === "text" && props.preview.path)) return "plaintext";
+  return guessLanguageFromPath(props.preview.path);
+});
+
+const highlightedHtml = computed(() => {
+  if (!(props.preview?.kind === "text" && props.preview.content != null)) return "";
+  return highlightCodeFromPath(props.preview.content, props.preview.path);
+});
+
+const isCollapsed = computed(() => !!props.collapsed);
+
 watch(
   () => props.preview?.path,
   () => {
@@ -166,47 +184,75 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <aside class="panel relative">
-    <div v-if="busy" class="loading-overlay"><div class="spinner" /></div>
-    <div class="panel-header">
-      <div class="panel-title">预览</div>
-    </div>
+  <aside class="panel preview-panel relative" :class="{ collapsed: isCollapsed }">
+    <div v-if="busy && !isCollapsed" class="loading-overlay"><div class="spinner" /></div>
 
-    <div v-if="!preview" class="empty-state">
-      <strong>未选择文件</strong>
-      <div class="tiny">点击文件或文件夹后，在此预览内容。</div>
-    </div>
-
-    <template v-else>
-      <div class="preview-meta">
-        <h3>{{ preview.name }}</h3>
-        <div class="tiny muted">{{ preview.path }}</div>
-        <div class="tiny muted" style="margin-top: 6px">
-          {{ preview.kind === "directory" ? "文件夹" : formatSize(preview.size) }}
-          <span v-if="preview.mime"> · {{ preview.mime }}</span>
-        </div>
+    <template v-if="!isCollapsed">
+      <div class="panel-header preview-header">
+        <div class="panel-title">预览</div>
+        <button
+          type="button"
+          class="btn btn-ghost btn-icon preview-toggle"
+          title="收起预览区"
+          @click="emit('toggle-collapse')"
+        >
+          »
+        </button>
+      </div>
+      <div v-if="!preview" class="empty-state">
+        <strong>未选择文件</strong>
+        <div class="tiny">点击文件或文件夹后，在此预览内容。</div>
       </div>
 
-      <div class="preview-content preview-selectable">
-        <div v-if="preview.kind === 'image' && preview.dataUrl" class="preview-image-wrap">
-          <img
-            class="preview-image-thumb"
-            :src="preview.dataUrl"
-            :alt="preview.name"
-            title="点击放大查看"
-            @click="openLightbox"
-          />
-          <div class="tiny muted preview-image-hint">
-            点击放大 · 滚轮缩放 · 放大后拖拽查看 · Esc/右上角关闭
+      <template v-else>
+        <div class="preview-meta">
+          <h3>{{ preview.name }}</h3>
+          <div class="tiny muted">{{ preview.path }}</div>
+          <div class="tiny muted" style="margin-top: 6px">
+            {{ preview.kind === "directory" ? "文件夹" : formatSize(preview.size) }}
+            <span v-if="preview.mime"> · {{ preview.mime }}</span>
+            <span v-if="preview.kind === 'text' && textLanguage !== 'plaintext'">
+              · {{ textLanguage }}
+            </span>
           </div>
         </div>
-        <pre v-else-if="preview.kind === 'text' && preview.content != null">{{ preview.content }}</pre>
-        <div v-else class="empty-state" style="height: auto; padding: 24px 0">
-          <strong>{{ preview.message || "无法预览" }}</strong>
-          <div class="tiny" v-if="preview.kind === 'directory'">可双击进入该文件夹。</div>
+
+        <div class="preview-content preview-selectable">
+          <div v-if="preview.kind === 'image' && preview.dataUrl" class="preview-image-wrap">
+            <img
+              class="preview-image-thumb"
+              :src="preview.dataUrl"
+              :alt="preview.name"
+              title="点击放大查看"
+              @click="openLightbox"
+            />
+            <div class="tiny muted preview-image-hint">
+              点击放大 · 滚轮缩放 · 放大后拖拽查看 · Esc/右上角关闭
+            </div>
+          </div>
+          <pre
+            v-else-if="preview.kind === 'text' && preview.content != null"
+            class="preview-code hljs"
+            v-html="highlightedHtml"
+          />
+          <div v-else class="empty-state" style="height: auto; padding: 24px 0">
+            <strong>{{ preview.message || "无法预览" }}</strong>
+            <div class="tiny" v-if="preview.kind === 'directory'">可双击进入该文件夹。</div>
+          </div>
         </div>
-      </div>
+      </template>
     </template>
+
+    <button
+      v-else
+      type="button"
+      class="preview-collapsed-rail"
+      title="展开预览区"
+      @click="emit('toggle-collapse')"
+    >
+      <span class="preview-collapsed-expand">«</span>
+      <span class="preview-collapsed-label">预览</span>
+    </button>
 
     <div
       v-if="lightboxOpen && preview?.kind === 'image' && preview.dataUrl"

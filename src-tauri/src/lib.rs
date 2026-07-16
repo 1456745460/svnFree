@@ -184,6 +184,11 @@ fn svn_revert(path: String) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
+fn local_delete(path: String) -> Result<CommandResult, String> {
+    svn::delete_local_path(path)
+}
+
+#[tauri::command]
 fn svn_delete(path: String, force: Option<bool>) -> Result<CommandResult, String> {
     svn::delete_path(path, force.unwrap_or(true))
 }
@@ -273,6 +278,7 @@ pub fn run() {
             svn_blame,
             svn_patch,
             svn_revert,
+            local_delete,
             svn_delete,
             svn_clean,
             svn_rename,

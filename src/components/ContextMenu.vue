@@ -246,7 +246,8 @@ const statusLabel = computed(() => {
       <button v-if="canRename" type="button" @click="actFile('rename', $event)">重命名...</button>
       <button v-if="canResolved" type="button" @click="actFile('resolved', $event)">标记为已解决</button>
       <button v-if="canRevert" type="button" class="danger" @click="actFile('revert', $event)">还原</button>
-      <button type="button" class="danger" @click="actFile('remove', $event)">删除</button>
+      <button type="button" class="danger" @click="actFile('localDelete', $event)">本地删除</button>
+      <button type="button" class="danger" @click="actFile('svnDelete', $event)">SVN 删除</button>
     </template>
 
     <template v-else>

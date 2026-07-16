@@ -1280,44 +1280,40 @@ pub fn rename_path(path: String, new_name: String) -> Result<CommandResult, Stri
     }
 }
 
-pub fn delete_path(path: String, force: bool) -> Result<CommandResult, String> {
+/// 仅本地文件系统删除（不经过 svn）
+pub fn delete_local_path(path: String) -> Result<CommandResult, String> {
     let p = ensure_path_exists(&path)?;
     let path_str = p.to_str().unwrap_or(&path).to_string();
-    // 优先走 svn delete，失败则本地删除
-    let svn_res = if force {
+    if p.is_dir() {
+        fs::remove_dir_all(&p).map_err(|e| format!("删除文件夹失败: {e}"))?;
+    } else {
+        fs::remove_file(&p).map_err(|e| format!("删除文件失败: {e}"))?;
+    }
+    Ok(CommandResult {
+        success: true,
+        stdout: format!("已本地删除: {path_str}"),
+        stderr: String::new(),
+        code: Some(0),
+    })
+}
+
+/// 仅执行 svn delete（不做本地删除回退）
+pub fn delete_path(path: String, force: bool) -> Result<CommandResult, String> {
+    let p = PathBuf::from(&path);
+    let path_str = p.to_str().unwrap_or(&path).to_string();
+    // 已版本控制但磁盘缺失（status !）时仍允许 svn delete
+    if !p.exists() {
+        // 若父目录也不存在则直接报错
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(format!("路径不存在: {path}"));
+            }
+        }
+    }
+    if force {
         run_svn(&["delete", "--force", &path_str], None)
     } else {
         run_svn(&["delete", &path_str], None)
-    };
-
-    match svn_res {
-        Ok(r) if r.success => Ok(r),
-        Ok(r) => {
-            if p.is_dir() {
-                fs::remove_dir_all(&p).map_err(|e| format!("删除文件夹失败: {e}"))?;
-            } else {
-                fs::remove_file(&p).map_err(|e| format!("删除文件失败: {e}"))?;
-            }
-            Ok(CommandResult {
-                success: true,
-                stdout: format!("已本地删除: {path_str}\n{}", r.stdout),
-                stderr: r.stderr,
-                code: Some(0),
-            })
-        }
-        Err(_) => {
-            if p.is_dir() {
-                fs::remove_dir_all(&p).map_err(|e| format!("删除文件夹失败: {e}"))?;
-            } else {
-                fs::remove_file(&p).map_err(|e| format!("删除文件失败: {e}"))?;
-            }
-            Ok(CommandResult {
-                success: true,
-                stdout: format!("已本地删除: {path_str}"),
-                stderr: String::new(),
-                code: Some(0),
-            })
-        }
     }
 }
 
@@ -1467,41 +1463,80 @@ fn map_status_label(code: &str) -> String {
 fn guess_language(path: &Path) -> String {
     let ext = extension_of(path).unwrap_or_default();
     match ext.as_str() {
-        "js" | "mjs" | "cjs" => "javascript".into(),
-        "ts" => "typescript".into(),
-        "tsx" => "tsx".into(),
-        "jsx" => "jsx".into(),
-        "vue" => "xml".into(),
-        "json" => "json".into(),
-        "md" | "markdown" => "markdown".into(),
-        "py" => "python".into(),
+        "js" | "mjs" | "cjs" | "jsx" => "javascript".into(),
+        "ts" | "tsx" | "mts" | "cts" => "typescript".into(),
+        "vue" => "vue".into(),
+        "json" | "jsonc" | "json5" => "json".into(),
+        "md" | "markdown" | "mdx" => "markdown".into(),
+        "py" | "pyw" => "python".into(),
         "rs" => "rust".into(),
         "java" => "java".into(),
-        "kt" => "kotlin".into(),
+        "kt" | "kts" => "kotlin".into(),
+        "groovy" | "gvy" | "gy" | "gsh" => "groovy".into(),
+        "gradle" => "gradle".into(),
         "go" => "go".into(),
-        "rb" => "ruby".into(),
-        "php" => "php".into(),
+        "rb" | "erb" => "ruby".into(),
+        "php" | "phtml" => "php".into(),
         "c" | "h" => "c".into(),
-        "cpp" | "cc" | "cxx" | "hpp" => "cpp".into(),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "cpp".into(),
         "cs" => "csharp".into(),
         "swift" => "swift".into(),
-        "sh" | "bash" | "zsh" => "bash".into(),
-        "sql" => "sql".into(),
+        "m" | "mm" => "objectivec".into(),
+        "scala" | "sc" => "scala".into(),
+        "lua" => "lua".into(),
+        "pl" | "pm" => "perl".into(),
+        "r" => "r".into(),
+        "dart" => "dart".into(),
+        "vb" | "vbs" => "vbnet".into(),
+        "sh" | "bash" | "zsh" | "ksh" => "bash".into(),
+        "shell" => "shell".into(),
+        "bat" | "cmd" => "dos".into(),
+        "ps1" | "psm1" | "psd1" => "powershell".into(),
+        "sql" | "ddl" | "dml" => "sql".into(),
         "yml" | "yaml" => "yaml".into(),
-        "toml" => "ini".into(),
-        "xml" | "html" | "htm" | "svg" => "xml".into(),
-        "css" | "scss" | "less" => "css".into(),
-        "txt" | "log" | "gitignore" | "env" | "properties" => "plaintext".into(),
+        "toml" => "toml".into(),
+        "ini" | "cfg" | "conf" => "ini".into(),
+        "properties" | "prop" | "mf" => "properties".into(),
+        // FreeMarker / JSP stack commonly used by CCF member project
+        "ftl" | "ftlh" | "ftlx" => "ftl".into(),
+        "jsp" | "jspf" | "jspx" | "tag" | "tagx" => "jsp".into(),
+        "tld" => "tld".into(),
+        "xml" | "xsl" | "xslt" | "xsd" | "wsdl" | "plist" | "iml" => "xml".into(),
+        "html" | "htm" | "xhtml" => "html".into(),
+        "svg" => "svg".into(),
+        "css" => "css".into(),
+        "scss" | "sass" => "scss".into(),
+        "less" => "less".into(),
+        "diff" | "patch" => "diff".into(),
+        "http" => "http".into(),
+        "nginx" => "nginx".into(),
+        "dockerfile" => "dockerfile".into(),
+        "makefile" | "mk" => "makefile".into(),
+        "env" => "env".into(),
+        "txt" | "log" | "gitignore" | "gitattributes" | "editorconfig" | "npmrc" | "nvmrc"
+        | "classpath" | "project" | "prefs" | "bak" => "plaintext".into(),
         _ => {
             let name = path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if name == "dockerfile" {
+            if name == "dockerfile" || name.starts_with("dockerfile.") {
                 "dockerfile".into()
-            } else if name == "makefile" {
+            } else if name == "makefile" || name == "gnumakefile" || name == "cmakelists.txt" {
                 "makefile".into()
+            } else if name == "pom.xml" {
+                "xml".into()
+            } else if name == "build.gradle" || name == "settings.gradle" {
+                "gradle".into()
+            } else if name == "build.gradle.kts" || name == "settings.gradle.kts" {
+                "kotlin".into()
+            } else if name == "nginx.conf" || name.ends_with(".nginx") {
+                "nginx".into()
+            } else if name == ".env" || name.starts_with(".env.") {
+                "properties".into()
+            } else if name == "manifest.mf" {
+                "properties".into()
             } else {
                 "plaintext".into()
             }

@@ -73,7 +73,8 @@ export type ContextAction =
   | "reveal"
   | "clean"
   | "rename"
-  | "remove";
+  | "localDelete"
+  | "svnDelete";
 
 /** 左侧工作副本右键 */
 export type WorkspaceAction =
