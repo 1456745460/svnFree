@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { marked } from "marked";
 import type { PreviewPayload } from "../types";
-import { guessLanguageFromPath, highlightCodeFromPath } from "../utils/codeHighlight";
+import { guessLanguageFromPath, highlightCode, highlightCodeFromPath } from "../utils/codeHighlight";
 
 const props = defineProps<{
   preview: PreviewPayload | null;
@@ -25,6 +26,27 @@ const MAX_SCALE = 8;
 let dragState: { startX: number; startY: number; originX: number; originY: number; moved: boolean } | null =
   null;
 let suppressClickUntil = 0;
+
+type MdViewMode = "preview" | "source";
+const mdViewMode = ref<MdViewMode>("preview");
+
+function readMdViewPref(): MdViewMode {
+  try {
+    const v = localStorage.getItem("sf.preview.mdMode");
+    return v === "source" ? "source" : "preview";
+  } catch {
+    return "preview";
+  }
+}
+
+function setMdViewMode(mode: MdViewMode) {
+  mdViewMode.value = mode;
+  try {
+    localStorage.setItem("sf.preview.mdMode", mode);
+  } catch {
+    // ignore
+  }
+}
 
 function formatSize(size: number) {
   if (size < 1024) return `${size} B`;
@@ -163,7 +185,47 @@ const highlightedHtml = computed(() => {
   return highlightCodeFromPath(props.preview.content, props.preview.path);
 });
 
+const isMarkdown = computed(() => {
+  if (!(props.preview?.kind === "text" && props.preview.path)) return false;
+  return textLanguage.value === "markdown";
+});
+
+const renderedMarkdownHtml = computed(() => {
+  if (!(isMarkdown.value && props.preview?.content != null)) return "";
+  try {
+    const raw = marked.parse(props.preview.content, {
+      async: false,
+      gfm: true,
+      breaks: false,
+    }) as string;
+    // 为代码块补充语法高亮
+    return raw.replace(
+      /<pre><code(?: class="language-([^"]*)")?>([\s\S]*?)<\/code><\/pre>/g,
+      (_m, lang: string | undefined, code: string) => {
+        const decoded = code
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&amp;/g, "&")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'");
+        const language = (lang || "").trim() || "plaintext";
+        const highlighted = highlightCode(decoded, language);
+        const cls = language && language !== "plaintext" ? ` class="language-${language} hljs"` : ' class="hljs"';
+        return `<pre><code${cls}>${highlighted}</code></pre>`;
+      },
+    );
+  } catch {
+    return `<pre class="preview-code">${props.preview.content
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")}</pre>`;
+  }
+});
+
 const isCollapsed = computed(() => !!props.collapsed);
+
+// 初始化 markdown 视图偏好
+mdViewMode.value = readMdViewPref();
 
 watch(
   () => props.preview?.path,
@@ -206,14 +268,34 @@ onBeforeUnmount(() => {
 
       <template v-else>
         <div class="preview-meta">
-          <h3>{{ preview.name }}</h3>
-          <div class="tiny muted">{{ preview.path }}</div>
-          <div class="tiny muted" style="margin-top: 6px">
-            {{ preview.kind === "directory" ? "文件夹" : formatSize(preview.size) }}
-            <span v-if="preview.mime"> · {{ preview.mime }}</span>
-            <span v-if="preview.kind === 'text' && textLanguage !== 'plaintext'">
-              · {{ textLanguage }}
-            </span>
+          <div class="preview-meta-top">
+            <div class="preview-meta-main">
+              <h3>{{ preview.name }}</h3>
+              <div class="tiny muted">{{ preview.path }}</div>
+              <div class="tiny muted" style="margin-top: 6px">
+                {{ preview.kind === "directory" ? "文件夹" : formatSize(preview.size) }}
+                <span v-if="preview.mime"> · {{ preview.mime }}</span>
+                <span v-if="preview.kind === 'text' && textLanguage !== 'plaintext'">
+                  · {{ textLanguage }}
+                </span>
+              </div>
+            </div>
+            <div v-if="isMarkdown" class="preview-md-toggle view-toggle" title="Markdown 预览模式">
+              <button
+                type="button"
+                :class="{ active: mdViewMode === 'preview' }"
+                @click="setMdViewMode('preview')"
+              >
+                渲染
+              </button>
+              <button
+                type="button"
+                :class="{ active: mdViewMode === 'source' }"
+                @click="setMdViewMode('source')"
+              >
+                源码
+              </button>
+            </div>
           </div>
         </div>
 
@@ -230,6 +312,11 @@ onBeforeUnmount(() => {
               点击放大 · 滚轮缩放 · 放大后拖拽查看 · Esc/右上角关闭
             </div>
           </div>
+          <div
+            v-else-if="isMarkdown && preview.content != null && mdViewMode === 'preview'"
+            class="markdown-body"
+            v-html="renderedMarkdownHtml"
+          />
           <pre
             v-else-if="preview.kind === 'text' && preview.content != null"
             class="preview-code hljs"
