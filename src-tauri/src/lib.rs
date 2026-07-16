@@ -119,7 +119,10 @@ fn svn_status(path: String, recursive: Option<bool>) -> Result<Vec<svn::SvnStatu
 }
 
 #[tauri::command]
-fn svn_status_many(paths: Vec<String>, recursive: Option<bool>) -> Result<Vec<svn::SvnStatusItem>, String> {
+fn svn_status_many(
+    paths: Vec<String>,
+    recursive: Option<bool>,
+) -> Result<Vec<svn::SvnStatusItem>, String> {
     if paths.is_empty() {
         return Err("没有可查询的路径".into());
     }
@@ -227,6 +230,20 @@ fn svn_log(path: String, limit: Option<u32>) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
+fn svn_log_entries(path: String, limit: Option<u32>) -> Result<Vec<svn::SvnLogEntry>, String> {
+    svn::log_entries(path, limit)
+}
+
+#[tauri::command]
+fn svn_revision_diff_file_content(
+    path: String,
+    revision: String,
+    action: Option<String>,
+) -> Result<svn::DiffFileContent, String> {
+    svn::revision_diff_file_content(path, revision, action)
+}
+
+#[tauri::command]
 fn svn_proplist(path: String) -> Result<CommandResult, String> {
     svn::proplist(path)
 }
@@ -286,6 +303,8 @@ pub fn run() {
             svn_diff_files,
             svn_diff_file_content,
             svn_log,
+            svn_log_entries,
+            svn_revision_diff_file_content,
             svn_proplist,
             svn_info,
             reveal_in_finder,

@@ -22,6 +22,8 @@ import { highlightCode } from "../utils/codeHighlight";
 const props = defineProps<{
   rootPath: string;
   title?: string;
+  revision?: string | null;
+  revisionAction?: string | null;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -140,7 +142,9 @@ const typographyStyle = computed(() => {
   } as Record<string, string>;
 });
 
-const rootLabel = computed(() => props.title || props.rootPath || "DIFF");
+const rootLabel = computed(() =>
+  props.title || (props.revision ? `${props.rootPath} @ r${props.revision}` : props.rootPath) || "DIFF",
+);
 
 function persistPrefs() {
   writePref("sf.diff.mode", mode.value);
@@ -263,7 +267,9 @@ async function loadFiles() {
         continue;
       }
       try {
-        const content = await api.svnDiffFileContent(item.path);
+        const content = props.revision
+          ? await api.svnRevisionDiffFileContent(item.path, props.revision, props.revisionAction || item.status)
+          : await api.svnDiffFileContent(item.path);
         if (content.binary) {
           enriched.push({ ...item, binary: true, additions: 0, deletions: 0 });
         } else {
@@ -302,7 +308,13 @@ async function selectFile(path: string, force = false) {
   expandedHunks.value = new Set();
   currentDiffIndex.value = -1;
   try {
-    const content = await api.svnDiffFileContent(path);
+    const content = props.revision
+      ? await api.svnRevisionDiffFileContent(
+          path,
+          props.revision,
+          props.revisionAction || files.value.find((f) => f.path === path)?.status,
+        )
+      : await api.svnDiffFileContent(path);
     fileContent.value = content;
     if (content.binary || content.message) {
       builtDiff.value = null;
@@ -671,7 +683,7 @@ watch([syncScroll, showPath, fontFamily, fontSize], () => {
 });
 
 watch(
-  () => props.rootPath,
+  () => [props.rootPath, props.revision],
   () => {
     void loadFiles();
   },

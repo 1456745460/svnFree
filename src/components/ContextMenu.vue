@@ -200,7 +200,7 @@ const canPatch = computed(() => !multi.value);
 const canClean = computed(() => !multi.value && !!props.entry?.isDir);
 const canRename = computed(() => !multi.value);
 const canUpdate = computed(() => !multi.value);
-const canLog = computed(() => !multi.value);
+const canLog = computed(() => !multi.value && !props.entry?.isDir);
 const canInfo = computed(() => !multi.value);
 const canProplist = computed(() => !multi.value);
 

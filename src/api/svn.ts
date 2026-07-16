@@ -5,6 +5,7 @@ import type {
   DiffFileInfo,
   FsEntry,
   PreviewPayload,
+  SvnLogEntry,
   SvnStatusItem,
   Workspace,
 } from "../types";
@@ -120,6 +121,14 @@ export function svnDiffFileContent(path: string) {
 
 export function svnLog(path: string, limit = 30) {
   return invoke<CommandResult>("svn_log", { path, limit });
+}
+
+export function svnLogEntries(path: string, limit = 30) {
+  return invoke<SvnLogEntry[]>("svn_log_entries", { path, limit });
+}
+
+export function svnRevisionDiffFileContent(path: string, revision: string, action?: string | null) {
+  return invoke<DiffFileContent>("svn_revision_diff_file_content", { path, revision, action: action || null });
 }
 
 export function svnProplist(path: string) {

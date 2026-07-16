@@ -16,6 +16,7 @@ import type {
   FsEntry,
   PreviewPayload,
   ProgressState,
+  SvnLogEntry,
   SvnProgressEvent,
   SvnStatusItem,
   ToastMessage,
@@ -147,12 +148,13 @@ const statusText = ref("就绪");
 const toasts = ref<ToastMessage[]>([]);
 let toastSeq = 1;
 
-const modalType = ref<"checkout" | "commit" | "output" | "rename" | "switch" | "changes" | null>(null);
+const modalType = ref<"checkout" | "commit" | "output" | "rename" | "switch" | "changes" | "history" | null>(null);
 const modalTitle = ref("");
 const modalOutput = ref("");
 const diffViewerOpen = ref(false);
 const diffViewerPath = ref("");
 const diffViewerTitle = ref("DIFF");
+const diffViewerRevision = ref<string | null>(null);
 const commitTarget = ref<string>("");
 const commitItems = ref<SvnStatusItem[]>([]);
 const commitLoading = ref(false);
@@ -165,6 +167,11 @@ const renameFromName = ref<string>("");
 const renameWorkspaceId = ref<string>("");
 const renameKind = ref<"file" | "workspace">("file");
 const columnStacks = ref<{ path: string; entries: FsEntry[]; selected?: string | null }[]>([]);
+const historyRoot = ref("");
+const historyItems = ref<SvnLogEntry[]>([]);
+const historyLoading = ref(false);
+const historySelectedRevision = ref<string>("");
+const historySelectedAction = ref<string>("");
 
 const contextMenu = ref<ContextMenuState>({
   visible: false,
@@ -776,14 +783,70 @@ function showOutput(title: string, text: string) {
   modalType.value = "output";
 }
 
-async function openDiffViewer(path: string, title?: string) {
+function closeModal() {
+  modalType.value = null;
+}
+
+async function openDiffViewer(path: string, title?: string, revision?: string | null) {
   if (!path) {
     toast("没有可对比的路径", "info");
     return;
   }
   diffViewerPath.value = path;
   diffViewerTitle.value = title || `DIFF · ${path.split("/").pop() || path}`;
+  diffViewerRevision.value = revision || null;
   diffViewerOpen.value = true;
+}
+
+async function openHistoryDialog(targetPath?: string) {
+  const path = targetPath || activeWorkspace.value?.path || currentPath.value;
+  if (!path) {
+    toast("请先选择文件", "info");
+    return;
+  }
+  historyRoot.value = path;
+  historyItems.value = [];
+  historyLoading.value = true;
+  historySelectedRevision.value = "";
+  historySelectedAction.value = "";
+  modalType.value = "history";
+  try {
+    historyItems.value = await api.svnLogEntries(path, 50);
+    if (historyItems.value.length) {
+      await selectHistoryEntry(historyItems.value[0]);
+    } else {
+      toast("没有找到历史记录", "info");
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    toast(msg || "读取历史失败", "error");
+    historyItems.value = [];
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+async function selectHistoryEntry(entry: SvnLogEntry) {
+  historySelectedRevision.value = entry.revision;
+  historySelectedAction.value =
+    entry.paths.find((p) => p.path === historyRoot.value || p.path.endsWith(`/${historyRoot.value.split("/").pop() || ""}`))?.action ||
+    entry.paths[0]?.action ||
+    "M";
+  const label = `历史版本 r${entry.revision} · ${historyRoot.value.split("/").pop() || historyRoot.value}`;
+  await openDiffViewer(historyRoot.value, label, entry.revision);
+}
+
+async function refreshHistoryDialog() {
+  if (!historyRoot.value) return;
+  historyLoading.value = true;
+  try {
+    historyItems.value = await api.svnLogEntries(historyRoot.value, 50);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    toast(msg || "刷新历史失败", "error");
+  } finally {
+    historyLoading.value = false;
+  }
 }
 
 async function actionTargets(entry: FsEntry | null): Promise<string[]> {
@@ -1195,13 +1258,7 @@ async function runAction(action: ContextAction) {
       toast("查看日志仅支持单选", "info");
       return;
     }
-    const res = await withBusy(async () => api.svnLog(path, 50), "获取日志...");
-    if (res) {
-      showOutput(
-        `日志 · ${entry.name}`,
-        [res.stdout, res.stderr].filter(Boolean).join("\n") || "(无日志)",
-      );
-    }
+    await openHistoryDialog(path);
     return;
   }
 
@@ -1667,7 +1724,11 @@ onUnmounted(() => {
       :changes-root="changesRoot"
       :changes-items="changesItems"
       :changes-loading="changesLoading"
-      @close="modalType = null"
+      :history-root="historyRoot"
+      :history-items="historyItems"
+      :history-loading="historyLoading"
+      :history-selected-revision="historySelectedRevision"
+      @close="closeModal"
       @close-progress="closeProgress"
       @checkout="onCheckout"
       @commit="onCommit"
@@ -1675,13 +1736,17 @@ onUnmounted(() => {
       @switch="onSwitch"
       @changes-action="onChangesAction"
       @refresh-changes="refreshChangesDialog"
+      @history-select="selectHistoryEntry"
+      @refresh-history="refreshHistoryDialog"
     />
 
     <div v-if="diffViewerOpen" class="diff-overlay">
       <DiffViewer
         :root-path="diffViewerPath"
         :title="diffViewerTitle"
-        @close="diffViewerOpen = false"
+        :revision="diffViewerRevision"
+        :revision-action="historySelectedAction"
+        @close="diffViewerOpen = false; diffViewerRevision = null"
       />
     </div>
 

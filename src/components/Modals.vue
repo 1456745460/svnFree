@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ProgressState, SvnStatusItem } from "../types";
+import type { ProgressState, SvnLogEntry, SvnStatusItem } from "../types";
 import { canRevertSvnStatus, getSvnStatusMeta } from "../utils/materialIcon";
 
 const props = defineProps<{
-  type: "checkout" | "commit" | "output" | "rename" | "switch" | "changes" | null;
+  type: "checkout" | "commit" | "output" | "rename" | "switch" | "changes" | "history" | null;
   title?: string;
   output?: string;
   busy?: boolean;
@@ -19,6 +19,10 @@ const props = defineProps<{
   changesRoot?: string;
   changesItems?: SvnStatusItem[];
   changesLoading?: boolean;
+  historyRoot?: string;
+  historyItems?: SvnLogEntry[];
+  historyLoading?: boolean;
+  historySelectedRevision?: string;
 }>();
 
 const emit = defineEmits<{
@@ -30,6 +34,8 @@ const emit = defineEmits<{
   switch: [payload: { url: string }];
   changesAction: [payload: { action: "diff" | "revert" | "commit" | "reveal"; path: string }];
   refreshChanges: [];
+  historySelect: [entry: SvnLogEntry];
+  refreshHistory: [];
 }>();
 
 const url = ref("");
@@ -40,6 +46,20 @@ const newName = ref("");
 const switchUrl = ref("");
 const logBox = ref<HTMLElement | null>(null);
 const checked = ref<Record<string, boolean>>({});
+
+function historySummary(entry: SvnLogEntry) {
+  return entry.message.split("\n").find((line) => line.trim()) || "(无说明)";
+}
+
+function historyDateLabel(entry: SvnLogEntry) {
+  if (!entry.date) return "—";
+  const date = new Date(entry.date);
+  return Number.isNaN(date.getTime()) ? entry.date : date.toLocaleString();
+}
+
+function historyPathLabel(entry: SvnLogEntry) {
+  return entry.paths.length ? `${entry.paths.length} 个变更路径` : "无路径";
+}
 
 async function pickCheckoutDirectory() {
   if (props.busy) return;
@@ -406,6 +426,50 @@ function submitSwitch() {
       <div class="modal-footer">
         <button class="btn" :disabled="busy" @click="emit('close')">关闭</button>
         <button class="btn btn-primary" :disabled="busy || !(changesItems || []).length" @click="emit('changesAction', { action: 'commit', path: changesRoot || '' })">去提交...</button>
+      </div>
+    </div>
+
+    <div v-else-if="type === 'history'" class="modal commit-modal wide">
+      <div class="modal-header">
+        <h3>变更历史</h3>
+        <button class="btn btn-ghost btn-icon" :disabled="busy" @click="emit('close')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>文件</label>
+          <div class="tiny mono muted" :title="historyRoot">{{ historyRoot || "—" }}</div>
+        </div>
+        <div class="field">
+          <div class="commit-list-head">
+            <label>历史列表</label>
+            <div class="commit-list-actions">
+              <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || historyLoading" @click="emit('refreshHistory')">刷新</button>
+              <span class="tiny muted">{{ (historyItems || []).length }} 条</span>
+            </div>
+          </div>
+          <div v-if="historyLoading" class="commit-empty">正在读取历史...</div>
+          <div v-else-if="!(historyItems || []).length" class="commit-empty">当前没有历史记录。</div>
+          <div v-else class="commit-file-list history-list">
+            <button
+              v-for="entry in historyItems"
+              :key="entry.revision"
+              type="button"
+              class="commit-file-row history-row"
+              :class="{ active: entry.revision === historySelectedRevision }"
+              :title="historySummary(entry)"
+              @click="emit('historySelect', entry)"
+            >
+              <span class="status-badge history-rev">r{{ entry.revision }}</span>
+              <span class="commit-file-name history-message">{{ historySummary(entry) }}</span>
+              <span class="tiny muted history-meta">{{ entry.author || "—" }} · {{ historyDateLabel(entry) }}</span>
+              <span class="tiny muted history-meta">{{ historyPathLabel(entry) }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="tiny muted">点击任一版本即可在差异窗口中查看该次提交对当前文件的变更。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" :disabled="busy" @click="emit('close')">关闭</button>
       </div>
     </div>
   </div>

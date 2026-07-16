@@ -52,6 +52,22 @@ export interface SvnStatusItem {
   relativePath: string;
 }
 
+export interface SvnLogPath {
+  path: string;
+  action: string;
+  kind?: string | null;
+  copyFromPath?: string | null;
+  copyFromRevision?: string | null;
+}
+
+export interface SvnLogEntry {
+  revision: string;
+  author?: string | null;
+  date?: string | null;
+  message: string;
+  paths: SvnLogPath[];
+}
+
 export type ViewMode = "list" | "icons" | "columns";
 
 /** 中间文件列表右键 */
@@ -158,4 +174,3 @@ export interface DiffViewerState {
   rootPath: string;
   title: string;
 }
-

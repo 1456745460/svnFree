@@ -1427,6 +1427,36 @@ body.col-resizing * {
   font-family: var(--mono);
 }
 
+.history-list .history-row {
+  grid-template-columns: 74px minmax(0, 1.4fr) minmax(180px, 0.9fr) minmax(120px, 0.7fr);
+  cursor: pointer;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  font: inherit;
+}
+
+.history-list .history-row.active {
+  background: color-mix(in srgb, var(--accent-soft) 20%, var(--bg-hover));
+}
+
+.history-list .history-row .history-message {
+  font-family: inherit;
+}
+
+.history-list .history-row .history-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-badge.history-rev {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
 .commit-empty {
   border: 1px dashed var(--border);
   border-radius: 8px;

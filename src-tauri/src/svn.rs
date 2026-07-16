@@ -1,4 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufReader, Read};
@@ -29,11 +31,7 @@ fn decode_svn_unicode_escapes(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{'
-            && i + 3 < bytes.len()
-            && bytes[i + 1] == b'U'
-            && bytes[i + 2] == b'+'
-        {
+        if bytes[i] == b'{' && i + 3 < bytes.len() && bytes[i + 1] == b'U' && bytes[i + 2] == b'+' {
             let mut j = i + 3;
             while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
                 j += 1;
@@ -64,57 +62,58 @@ fn normalize_svn_text(input: &str) -> String {
 
 fn svn_binary() -> &'static str {
     static SVN_BIN: OnceLock<String> = OnceLock::new();
-    SVN_BIN.get_or_init(|| {
-        // GUI/Tauri 启动时 PATH 通常不含 Homebrew，优先探测绝对路径
-        let candidates = [
-            "/opt/homebrew/bin/svn",
-            "/usr/local/bin/svn",
-            "/opt/local/bin/svn",
-            "/usr/bin/svn",
-            "svn",
-        ];
+    SVN_BIN
+        .get_or_init(|| {
+            // GUI/Tauri 启动时 PATH 通常不含 Homebrew，优先探测绝对路径
+            let candidates = [
+                "/opt/homebrew/bin/svn",
+                "/usr/local/bin/svn",
+                "/opt/local/bin/svn",
+                "/usr/bin/svn",
+                "svn",
+            ];
 
-        for candidate in candidates {
-            // 绝对路径先确认文件存在，避免误报 No such file
-            if candidate.starts_with('/') && !Path::new(candidate).exists() {
-                continue;
-            }
-            let mut cmd = Command::new(candidate);
-            cmd.arg("--version").arg("--quiet");
-            if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
-                return candidate.to_string();
-            }
-        }
-
-        // 兜底：通过 login shell 读取用户 PATH 后再找
-        if let Ok(output) = Command::new("/bin/zsh")
-            .args(["-lc", "command -v svn || true"])
-            .output()
-        {
-            if output.status.success() {
-                let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !found.is_empty() && Path::new(&found).exists() {
-                    return found;
+            for candidate in candidates {
+                // 绝对路径先确认文件存在，避免误报 No such file
+                if candidate.starts_with('/') && !Path::new(candidate).exists() {
+                    continue;
+                }
+                let mut cmd = Command::new(candidate);
+                cmd.arg("--version").arg("--quiet");
+                if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
+                    return candidate.to_string();
                 }
             }
-        }
 
-        // 再尝试 bash login
-        if let Ok(output) = Command::new("/bin/bash")
-            .args(["-lc", "command -v svn || true"])
-            .output()
-        {
-            if output.status.success() {
-                let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !found.is_empty() && Path::new(&found).exists() {
-                    return found;
+            // 兜底：通过 login shell 读取用户 PATH 后再找
+            if let Ok(output) = Command::new("/bin/zsh")
+                .args(["-lc", "command -v svn || true"])
+                .output()
+            {
+                if output.status.success() {
+                    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !found.is_empty() && Path::new(&found).exists() {
+                        return found;
+                    }
                 }
             }
-        }
 
-        "/opt/homebrew/bin/svn".to_string()
-    })
-    .as_str()
+            // 再尝试 bash login
+            if let Ok(output) = Command::new("/bin/bash")
+                .args(["-lc", "command -v svn || true"])
+                .output()
+            {
+                if output.status.success() {
+                    let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !found.is_empty() && Path::new(&found).exists() {
+                        return found;
+                    }
+                }
+            }
+
+            "/opt/homebrew/bin/svn".to_string()
+        })
+        .as_str()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +174,26 @@ pub struct SvnStatusItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SvnLogPath {
+    pub path: String,
+    pub action: String,
+    pub kind: Option<String>,
+    pub copy_from_path: Option<String>,
+    pub copy_from_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvnLogEntry {
+    pub revision: String,
+    pub author: Option<String>,
+    pub date: Option<String>,
+    pub message: String,
+    pub paths: Vec<SvnLogPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffFileInfo {
     pub path: String,
     pub relative_path: String,
@@ -201,7 +220,6 @@ pub struct DiffFileContent {
     pub language: String,
     pub message: Option<String>,
 }
-
 
 fn run_svn(args: &[&str], cwd: Option<&Path>) -> Result<CommandResult, String> {
     let svn = svn_binary();
@@ -273,8 +291,16 @@ pub fn emit_job_done(app: &AppHandle, job_id: &str, success: bool, message: &str
         app,
         SvnProgressEvent {
             job_id: job_id.to_string(),
-            phase: if success { "done".into() } else { "error".into() },
-            line: if success { None } else { Some(message.to_string()) },
+            phase: if success {
+                "done".into()
+            } else {
+                "error".into()
+            },
+            line: if success {
+                None
+            } else {
+                Some(message.to_string())
+            },
             stream: if success { None } else { Some("stderr".into()) },
             success: Some(success),
             code: None,
@@ -335,9 +361,8 @@ fn pump_lines<R: std::io::Read + Send + 'static>(
         }
 
         if !line_buf.is_empty() {
-            let line = sanitize_log_line(
-                &String::from_utf8_lossy(&line_buf).trim_end_matches('\r'),
-            );
+            let line =
+                sanitize_log_line(&String::from_utf8_lossy(&line_buf).trim_end_matches('\r'));
             if !line.is_empty() {
                 if let Ok(mut buf) = collect.lock() {
                     if !buf.is_empty() {
@@ -670,7 +695,9 @@ pub fn list_directory(path: String) -> Result<Vec<FsEntry>, String> {
     let read = fs::read_dir(&dir).map_err(|e| format!("读取目录失败: {e}"))?;
     for item in read {
         let item = item.map_err(|e| format!("读取目录项失败: {e}"))?;
-        let meta = item.metadata().map_err(|e| format!("读取元数据失败: {e}"))?;
+        let meta = item
+            .metadata()
+            .map_err(|e| format!("读取元数据失败: {e}"))?;
         let name = item.file_name().to_string_lossy().to_string();
         if name == ".svn" {
             continue;
@@ -754,10 +781,7 @@ pub fn commit(
 
     if selected.is_empty() {
         // 兼容：未指定路径时，对目标路径提交（不再自动 add 全部）
-        return run_svn(
-            &["commit", "-m", msg, p.to_str().unwrap_or(&path)],
-            None,
-        );
+        return run_svn(&["commit", "-m", msg, p.to_str().unwrap_or(&path)], None);
     }
 
     // 先把未版本控制项 add 进去
@@ -882,9 +906,12 @@ fn path_file_name(path: &Path) -> String {
 }
 
 fn sort_status_items(items: &mut [SvnStatusItem]) {
-    items.sort_by(|a, b| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase()));
+    items.sort_by(|a, b| {
+        a.relative_path
+            .to_lowercase()
+            .cmp(&b.relative_path.to_lowercase())
+    });
 }
-
 
 fn is_same_or_child_path(child: &str, parent: &str) -> bool {
     if child == parent {
@@ -898,7 +925,6 @@ fn is_same_or_child_path(child: &str, parent: &str) -> bool {
 fn is_child_path(child: &str, parent: &str) -> bool {
     child != parent && is_same_or_child_path(child, parent)
 }
-
 
 /// 未纳入版本控制的目录：`svn status` 通常只返回目录本身。
 /// 为了提交勾选列表，递归展开其内部文件/子目录。
@@ -1008,10 +1034,7 @@ pub fn status_list(path: String, recursive: Option<bool>) -> Result<Vec<SvnStatu
     let is_wc_root = target.join(".svn").exists();
     let (res, parse_cwd) = if is_wc_root {
         (
-            run_svn(
-                &["status", &format!("--depth={depth}"), "."],
-                Some(&target),
-            )?,
+            run_svn(&["status", &format!("--depth={depth}"), "."], Some(&target))?,
             target.clone(),
         )
     } else {
@@ -1047,8 +1070,12 @@ pub fn status_list(path: String, recursive: Option<bool>) -> Result<Vec<SvnStatu
     // 仅当目录本身是未版本控制（?）且 svn 未列出其子项时，才递归展开内部文件。
     // 注意：干净的已版本目录 status 为空，绝不能误展开成全部 ?。
     let target_str = target.to_string_lossy().to_string();
-    let has_children = items.iter().any(|item| is_child_path(&item.path, &target_str));
-    let self_unversioned = items.iter().any(|item| item.path == target_str && item.status == "?");
+    let has_children = items
+        .iter()
+        .any(|item| is_child_path(&item.path, &target_str));
+    let self_unversioned = items
+        .iter()
+        .any(|item| item.path == target_str && item.status == "?");
     if self_unversioned && !has_children {
         if let Ok(expanded) = expand_unversioned_tree(&target) {
             items = expanded;
@@ -1059,14 +1086,17 @@ pub fn status_list(path: String, recursive: Option<bool>) -> Result<Vec<SvnStatu
     Ok(items)
 }
 
-
 /// 合并多个目标（多选文件/文件夹）的变更列表。
 /// 会分别遍历每个选中文件夹内部变更，并并入选中的文件变更。
-pub fn status_list_many(paths: Vec<String>, recursive: Option<bool>) -> Result<Vec<SvnStatusItem>, String> {
+pub fn status_list_many(
+    paths: Vec<String>,
+    recursive: Option<bool>,
+) -> Result<Vec<SvnStatusItem>, String> {
     if paths.is_empty() {
         return Err("没有可查询的路径".into());
     }
-    let mut map: std::collections::BTreeMap<String, SvnStatusItem> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<String, SvnStatusItem> =
+        std::collections::BTreeMap::new();
     let mut errors: Vec<String> = Vec::new();
     for path in paths {
         match status_list(path.clone(), recursive) {
@@ -1109,9 +1139,7 @@ pub fn ignore_path(path: String) -> Result<CommandResult, String> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| "无法解析文件名".to_string())?
         .to_string();
-    let parent = p
-        .parent()
-        .ok_or_else(|| "无法解析父目录".to_string())?;
+    let parent = p.parent().ok_or_else(|| "无法解析父目录".to_string())?;
     let parent_str = parent.to_string_lossy().to_string();
 
     // 读取现有 svn:ignore
@@ -1141,7 +1169,12 @@ pub fn ignore_path(path: String) -> Result<CommandResult, String> {
     let value = format!("{}\n", lines.join("\n"));
 
     // 用临时方式 propset
-    let args = vec!["propset".to_string(), "svn:ignore".to_string(), value, parent_str];
+    let args = vec![
+        "propset".to_string(),
+        "svn:ignore".to_string(),
+        value,
+        parent_str,
+    ];
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let res = run_svn(&arg_refs, None)?;
     if res.success {
@@ -1200,10 +1233,7 @@ pub fn switch_to(path: String, url: String) -> Result<CommandResult, String> {
     if url.is_empty() {
         return Err("目标地址不能为空".into());
     }
-    run_svn(
-        &["switch", url, p.to_str().unwrap_or(&path)],
-        None,
-    )
+    run_svn(&["switch", url, p.to_str().unwrap_or(&path)], None)
 }
 
 pub fn blame(path: String) -> Result<CommandResult, String> {
@@ -1220,13 +1250,9 @@ pub fn create_patch(path: String) -> Result<CommandResult, String> {
     run_svn(&["diff", p.to_str().unwrap_or(&path)], None)
 }
 
-
 pub fn revert(path: String) -> Result<CommandResult, String> {
     let p = ensure_path_exists(&path)?;
-    run_svn(
-        &["revert", "-R", p.to_str().unwrap_or(&path)],
-        None,
-    )
+    run_svn(&["revert", "-R", p.to_str().unwrap_or(&path)], None)
 }
 
 pub fn clean(path: String) -> Result<CommandResult, String> {
@@ -1245,9 +1271,7 @@ pub fn rename_path(path: String, new_name: String) -> Result<CommandResult, Stri
         return Err("新名称不能包含路径分隔符".into());
     }
 
-    let parent = src
-        .parent()
-        .ok_or_else(|| "无法解析父目录".to_string())?;
+    let parent = src.parent().ok_or_else(|| "无法解析父目录".to_string())?;
     let dest = parent.join(new_name);
     if dest.exists() {
         return Err(format!("目标已存在: {}", dest.to_string_lossy()));
@@ -1326,15 +1350,316 @@ pub fn log(path: String, limit: Option<u32>) -> Result<CommandResult, String> {
     let p = ensure_path_exists(&path)?;
     let limit_str = limit.unwrap_or(30).to_string();
     run_svn(
+        &["log", "-l", &limit_str, "-v", p.to_str().unwrap_or(&path)],
+        None,
+    )
+}
+
+fn xml_unescape_text(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    quick_xml::escape::unescape(&text)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| text.into_owned())
+}
+
+fn parse_svn_log_xml(xml: &str) -> Result<Vec<SvnLogEntry>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut entries = Vec::new();
+
+    let mut current_revision = String::new();
+    let mut current_author: Option<String> = None;
+    let mut current_date: Option<String> = None;
+    let mut current_message = String::new();
+    let mut current_paths: Vec<SvnLogPath> = Vec::new();
+    let mut current_field: Option<&'static str> = None;
+    let mut current_path: Option<SvnLogPath> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"logentry" => {
+                    current_revision.clear();
+                    current_author = None;
+                    current_date = None;
+                    current_message.clear();
+                    current_paths.clear();
+                    current_field = None;
+                    current_path = None;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"revision" {
+                            if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+                                current_revision = value.into_owned();
+                            }
+                        }
+                    }
+                }
+                b"author" => current_field = Some("author"),
+                b"date" => current_field = Some("date"),
+                b"msg" => current_field = Some("msg"),
+                b"path" => {
+                    let mut path = SvnLogPath {
+                        path: String::new(),
+                        action: String::new(),
+                        kind: None,
+                        copy_from_path: None,
+                        copy_from_revision: None,
+                    };
+                    for attr in e.attributes().flatten() {
+                        let key = attr.key.as_ref();
+                        let value = attr
+                            .decode_and_unescape_value(reader.decoder())
+                            .map(|v| v.into_owned())
+                            .unwrap_or_default();
+                        match key {
+                            b"action" => path.action = value,
+                            b"kind" => path.kind = Some(value),
+                            b"copyfrom-path" | b"copy-from-path" => {
+                                path.copy_from_path = Some(value)
+                            }
+                            b"copyfrom-rev" | b"copy-from-rev" => {
+                                path.copy_from_revision = Some(value)
+                            }
+                            _ => {}
+                        }
+                    }
+                    current_path = Some(path);
+                    current_field = Some("path");
+                }
+                _ => {}
+            },
+            Ok(Event::Text(e)) => {
+                let text = normalize_svn_text(&xml_unescape_text(e.as_ref()));
+                match current_field {
+                    Some("author") => current_author = Some(text),
+                    Some("date") => current_date = Some(text),
+                    Some("msg") => {
+                        if !current_message.is_empty() {
+                            current_message.push('\n');
+                        }
+                        current_message.push_str(&text);
+                    }
+                    Some("path") => {
+                        if let Some(path) = current_path.as_mut() {
+                            path.path.push_str(&text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::CData(e)) => {
+                let text = normalize_svn_text(&String::from_utf8_lossy(e.as_ref()));
+                match current_field {
+                    Some("author") => current_author = Some(text),
+                    Some("date") => current_date = Some(text),
+                    Some("msg") => {
+                        if !current_message.is_empty() {
+                            current_message.push('\n');
+                        }
+                        current_message.push_str(&text);
+                    }
+                    Some("path") => {
+                        if let Some(path) = current_path.as_mut() {
+                            path.path.push_str(&text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"path" => {
+                    if let Some(path) = current_path.take() {
+                        current_paths.push(path);
+                    }
+                    current_field = None;
+                }
+                b"author" | b"date" | b"msg" => current_field = None,
+                b"logentry" => {
+                    if !current_revision.is_empty() {
+                        entries.push(SvnLogEntry {
+                            revision: current_revision.clone(),
+                            author: current_author.clone(),
+                            date: current_date.clone(),
+                            message: current_message.trim().to_string(),
+                            paths: current_paths.clone(),
+                        });
+                    }
+                    current_field = None;
+                    current_path = None;
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("解析 svn log XML 失败: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(entries)
+}
+
+pub fn log_entries(path: String, limit: Option<u32>) -> Result<Vec<SvnLogEntry>, String> {
+    let p = ensure_path_exists(&path)?;
+    let limit_str = limit.unwrap_or(30).to_string();
+    let res = run_svn(
         &[
             "log",
+            "--xml",
+            "-v",
             "-l",
             &limit_str,
-            "-v",
             p.to_str().unwrap_or(&path),
         ],
         None,
-    )
+    )?;
+    if !res.success && res.stdout.trim().is_empty() {
+        return Err(if res.stderr.trim().is_empty() {
+            "读取日志失败".into()
+        } else {
+            res.stderr
+        });
+    }
+    parse_svn_log_xml(&res.stdout)
+}
+
+fn svn_show_item(path: &Path, item: &str) -> Result<String, String> {
+    let svn = svn_binary();
+    let mut cmd = Command::new(svn);
+    cmd.args([
+        "info",
+        "--show-item",
+        item,
+        path.to_str().unwrap_or_default(),
+    ]);
+    apply_svn_locale(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("执行 svn info 失败: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(normalize_svn_text(
+        &String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn svn_cat_revision_text(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), String> {
+    svn_cat_revision(path, rev)
+}
+
+pub fn revision_diff_file_content(
+    path: String,
+    revision: String,
+    action: Option<String>,
+) -> Result<DiffFileContent, String> {
+    let target = ensure_path_exists(&path)?;
+    if target.is_dir() {
+        return Err("目录无法展示历史 Diff".into());
+    }
+
+    let root = find_wc_root(&target).unwrap_or_else(|| {
+        target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| target.clone())
+    });
+    let relative = relative_to_root(&root, &target);
+    let name = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&path)
+        .to_string();
+    let language = guess_language(&target);
+    let status = action.clone().unwrap_or_else(|| "M".into());
+    let status_label = map_status_label(&status);
+
+    let url = svn_show_item(&target, "url")?;
+    let rev_num = revision.trim();
+    if rev_num.is_empty() {
+        return Err("修订号不能为空".into());
+    }
+    let prev_rev = rev_num.parse::<i64>().ok().and_then(|n| {
+        if n > 1 {
+            Some((n - 1).to_string())
+        } else {
+            None
+        }
+    });
+
+    let (old_exists, old_bytes, old_over, new_exists, new_bytes, new_over) = match status.as_str() {
+        "A" => {
+            let new = svn_cat_revision_text(Path::new(&url), rev_num)?;
+            (false, Vec::new(), false, new.0, new.1, new.2)
+        }
+        "D" | "!" => {
+            let old = if let Some(prev) = prev_rev.as_deref() {
+                svn_cat_revision_text(Path::new(&url), prev)?
+            } else {
+                (false, Vec::new(), false)
+            };
+            (old.0, old.1, old.2, false, Vec::new(), false)
+        }
+        _ => {
+            let old = if let Some(prev) = prev_rev.as_deref() {
+                svn_cat_revision_text(Path::new(&url), prev)?
+            } else {
+                (false, Vec::new(), false)
+            };
+            let new = svn_cat_revision_text(Path::new(&url), rev_num)?;
+            (old.0, old.1, old.2, new.0, new.1, new.2)
+        }
+    };
+
+    let oversized = old_over || new_over;
+    let binary = oversized
+        || (old_exists && bytes_look_binary(&old_bytes))
+        || (new_exists && bytes_look_binary(&new_bytes));
+
+    if binary {
+        return Ok(DiffFileContent {
+            path,
+            relative_path: relative,
+            name,
+            status,
+            status_label,
+            binary: true,
+            old_text: String::new(),
+            new_text: String::new(),
+            old_exists,
+            new_exists,
+            language,
+            message: Some(if oversized {
+                format!("修订 {revision} 的文件过大（> 2MB），不展示文本 Diff")
+            } else {
+                format!("修订 {revision} 的二进制文件，无法展示文本 Diff")
+            }),
+        });
+    }
+
+    Ok(DiffFileContent {
+        path,
+        relative_path: relative,
+        name,
+        status,
+        status_label,
+        binary: false,
+        old_text: if old_exists {
+            String::from_utf8_lossy(&old_bytes).to_string()
+        } else {
+            String::new()
+        },
+        new_text: if new_exists {
+            String::from_utf8_lossy(&new_bytes).to_string()
+        } else {
+            String::new()
+        },
+        old_exists,
+        new_exists,
+        language,
+        message: None,
+    })
 }
 
 pub fn proplist(path: String) -> Result<CommandResult, String> {
@@ -1363,7 +1688,11 @@ pub fn preview_file(path: String) -> Result<PreviewPayload, String> {
     let p = ensure_path_exists(&path)?;
     if p.is_dir() {
         let count = fs::read_dir(&p)
-            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.file_name() != ".svn").count())
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name() != ".svn")
+                    .count()
+            })
             .unwrap_or(0);
         return Ok(PreviewPayload {
             kind: "directory".into(),
@@ -1445,8 +1774,6 @@ pub fn preview_file(path: String) -> Result<PreviewPayload, String> {
         message: Some("二进制文件，无法预览".into()),
     })
 }
-
-
 
 fn map_status_label(code: &str) -> String {
     match code {
@@ -1578,7 +1905,9 @@ fn svn_cat_revision(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), Str
     cmd.args(["cat", "-r", rev, &path_str]);
     apply_svn_locale(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = cmd.output().map_err(|e| format!("执行 svn cat 失败: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("执行 svn cat 失败: {e}"))?;
     if !output.status.success() {
         return Ok((false, Vec::new(), false));
     }
@@ -1630,7 +1959,9 @@ fn detect_binary(path: &Path, status_code: &str) -> Result<bool, String> {
     if new_over || old_over {
         return Ok(true);
     }
-    if (new_exists && bytes_look_binary(&new_bytes)) || (old_exists && bytes_look_binary(&old_bytes)) {
+    if (new_exists && bytes_look_binary(&new_bytes))
+        || (old_exists && bytes_look_binary(&old_bytes))
+    {
         return Ok(true);
     }
     Ok(false)
@@ -1821,7 +2152,6 @@ pub fn is_svn_working_copy(path: String) -> Result<bool, String> {
     let p = PathBuf::from(path);
     Ok(p.is_dir() && p.join(".svn").exists())
 }
-
 
 #[cfg(test)]
 mod tests {

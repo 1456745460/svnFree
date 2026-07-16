@@ -129,8 +129,6 @@ pub fn remove_workspace(id: String) -> Result<(), String> {
     save_store(&store)
 }
 
-
-
 pub fn rename_workspace(id: String, name: String) -> Result<Workspace, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
