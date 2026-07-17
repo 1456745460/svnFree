@@ -3,6 +3,7 @@ import type {
   CommandResult,
   DiffFileContent,
   DiffFileInfo,
+  DiffFileStat,
   FsEntry,
   PreviewPayload,
   SvnLogEntry,
@@ -129,6 +130,14 @@ export function svnLogEntries(path: string, limit = 30) {
 
 export function svnRevisionDiffFileContent(path: string, revision: string, action?: string | null) {
   return invoke<DiffFileContent>("svn_revision_diff_file_content", { path, revision, action: action || null });
+}
+
+export function svnWorkingDiffStats(path: string) {
+  return invoke<DiffFileStat[]>("svn_working_diff_stats", { path });
+}
+
+export function svnRevisionDiffStats(path: string, revision: string) {
+  return invoke<DiffFileStat[]>("svn_revision_diff_stats", { path, revision });
 }
 
 export function svnProplist(path: string) {

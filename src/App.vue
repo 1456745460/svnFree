@@ -10,21 +10,9 @@ import ContextMenu from "./components/ContextMenu.vue";
 import Modals from "./components/Modals.vue";
 import DiffViewer from "./components/DiffViewer.vue";
 import * as api from "./api/svn";
-import type {
-  ContextAction,
-  ContextMenuState,
-  FsEntry,
-  PreviewPayload,
-  ProgressState,
-  SvnLogEntry,
-  SvnProgressEvent,
-  SvnStatusItem,
-  ToastMessage,
-  ViewMode,
-  Workspace,
-  WorkspaceAction,
-} from "./types";
-import { canRevertSvnStatus } from "./utils/materialIcon";
+import type { ContextAction, ContextMenuState, DiffFileInfo, FsEntry, PreviewPayload, ProgressState, SvnLogEntry, SvnProgressEvent, SvnStatusItem, ToastMessage, ViewMode, Workspace, WorkspaceAction, SvnLogPath } from "./types";
+import { canRevertSvnStatus, getSvnStatusMeta } from "./utils/materialIcon";
+import { isUnsupportedDiffPath } from "./utils/diffSupport";
 
 const workspaces = ref<Workspace[]>([]);
 const activeId = ref<string | null>(null);
@@ -155,6 +143,8 @@ const diffViewerOpen = ref(false);
 const diffViewerPath = ref("");
 const diffViewerTitle = ref("DIFF");
 const diffViewerRevision = ref<string | null>(null);
+const diffViewerFiles = ref<DiffFileInfo[] | null>(null);
+const diffViewerFocusPath = ref<string | null>(null);
 const commitTarget = ref<string>("");
 const commitItems = ref<SvnStatusItem[]>([]);
 const commitLoading = ref(false);
@@ -172,6 +162,8 @@ const historyItems = ref<SvnLogEntry[]>([]);
 const historyLoading = ref(false);
 const historySelectedRevision = ref<string>("");
 const historySelectedAction = ref<string>("");
+const historyWcLocal = ref("");
+const historyRepoPrefix = ref("");
 
 const contextMenu = ref<ContextMenuState>({
   visible: false,
@@ -787,7 +779,19 @@ function closeModal() {
   modalType.value = null;
 }
 
-async function openDiffViewer(path: string, title?: string, revision?: string | null) {
+function closeDiffViewer() {
+  diffViewerOpen.value = false;
+  diffViewerRevision.value = null;
+  diffViewerFiles.value = null;
+  diffViewerFocusPath.value = null;
+}
+
+async function openDiffViewer(
+  path: string,
+  title?: string,
+  revision?: string | null,
+  options?: { files?: DiffFileInfo[] | null; focusPath?: string | null },
+) {
   if (!path) {
     toast("没有可对比的路径", "info");
     return;
@@ -795,13 +799,62 @@ async function openDiffViewer(path: string, title?: string, revision?: string | 
   diffViewerPath.value = path;
   diffViewerTitle.value = title || `DIFF · ${path.split("/").pop() || path}`;
   diffViewerRevision.value = revision || null;
+  diffViewerFiles.value = options?.files?.length ? [...options.files] : null;
+  diffViewerFocusPath.value = options?.focusPath || options?.files?.[0]?.path || null;
   diffViewerOpen.value = true;
 }
 
+function buildHistoryDiffFiles(entry: SvnLogEntry): DiffFileInfo[] {
+  const out: DiffFileInfo[] = [];
+  const seen = new Set<string>();
+  for (const item of entry.paths || []) {
+    if ((item.kind || "").toLowerCase() === "dir") continue;
+    if (isUnsupportedDiffPath(item.path, { kind: item.kind })) continue;
+    const local = resolveHistoryLocalPath(item.path);
+    if (!local || seen.has(local)) continue;
+    if (isUnsupportedDiffPath(local)) continue;
+    seen.add(local);
+    const name = local.split("/").pop() || item.path.split("/").filter(Boolean).pop() || item.path;
+    const meta = getSvnStatusMeta(item.action);
+    out.push({
+      path: local,
+      relativePath: (item.path || "").replace(/^\//, ""),
+      name,
+      status: item.action || "M",
+      statusLabel: meta?.label || item.action || "变更",
+      binary: false,
+      isDir: false,
+    });
+  }
+  return out;
+}
+
+async function openHistoryRevisionDiff(entry: SvnLogEntry, focusItem?: SvnLogPath | null) {
+  selectHistoryEntry(entry);
+  const files = buildHistoryDiffFiles(entry);
+  if (!files.length) {
+    toast("该次提交没有可映射的本地文件，无法打开差异", "info");
+    return;
+  }
+  let focus = files[0].path;
+  if (focusItem) {
+    const local = resolveHistoryLocalPath(focusItem.path);
+    if (local && files.some((f) => f.path === local)) focus = local;
+    historySelectedAction.value = focusItem.action || files.find((f) => f.path === focus)?.status || "M";
+  } else {
+    historySelectedAction.value = files[0].status || "M";
+  }
+  const root = historyWcLocal.value || historyRoot.value || activeWorkspace.value?.path || files[0].path;
+  await openDiffViewer(root, `历史版本 r${entry.revision}`, entry.revision, {
+    files,
+    focusPath: focus,
+  });
+}
+
 async function openHistoryDialog(targetPath?: string) {
-  const path = targetPath || activeWorkspace.value?.path || currentPath.value;
+  const path = (targetPath || activeWorkspace.value?.path || "").trim();
   if (!path) {
-    toast("请先选择文件", "info");
+    toast("请先选择工作副本或文件", "info");
     return;
   }
   historyRoot.value = path;
@@ -809,11 +862,14 @@ async function openHistoryDialog(targetPath?: string) {
   historyLoading.value = true;
   historySelectedRevision.value = "";
   historySelectedAction.value = "";
+  historyWcLocal.value = activeWorkspace.value?.path || path;
+  historyRepoPrefix.value = "";
   modalType.value = "history";
   try {
-    historyItems.value = await api.svnLogEntries(path, 50);
+    await prepareHistoryContext(path);
+    historyItems.value = await api.svnLogEntries(path, 80);
     if (historyItems.value.length) {
-      await selectHistoryEntry(historyItems.value[0]);
+      selectHistoryEntry(historyItems.value[0]);
     } else {
       toast("没有找到历史记录", "info");
     }
@@ -826,27 +882,105 @@ async function openHistoryDialog(targetPath?: string) {
   }
 }
 
-async function selectHistoryEntry(entry: SvnLogEntry) {
+function selectHistoryEntry(entry: SvnLogEntry) {
   historySelectedRevision.value = entry.revision;
   historySelectedAction.value =
-    entry.paths.find((p) => p.path === historyRoot.value || p.path.endsWith(`/${historyRoot.value.split("/").pop() || ""}`))?.action ||
+    entry.paths.find((p) => {
+      const leaf = historyRoot.value.split("/").pop() || "";
+      return p.path === historyRoot.value || (leaf && p.path.endsWith(`/${leaf}`));
+    })?.action ||
     entry.paths[0]?.action ||
     "M";
-  const label = `历史版本 r${entry.revision} · ${historyRoot.value.split("/").pop() || historyRoot.value}`;
-  await openDiffViewer(historyRoot.value, label, entry.revision);
 }
 
 async function refreshHistoryDialog() {
   if (!historyRoot.value) return;
   historyLoading.value = true;
   try {
-    historyItems.value = await api.svnLogEntries(historyRoot.value, 50);
+    historyItems.value = await api.svnLogEntries(historyRoot.value, 80);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     toast(msg || "刷新历史失败", "error");
   } finally {
     historyLoading.value = false;
   }
+}
+
+async function prepareHistoryContext(path: string) {
+  historyRepoPrefix.value = "";
+  historyWcLocal.value = activeWorkspace.value?.path || path;
+  try {
+    // 先对目标路径取 info，拿到 Working Copy Root，再对 WC 根取 URL 前缀
+    const probe = await api.svnInfo(path);
+    const probeOut = probe?.stdout || "";
+    const wcRoot =
+      probeOut.match(/^Working Copy Root Path:\s*(.+)$/m)?.[1]?.trim() ||
+      activeWorkspace.value?.path ||
+      path;
+    historyWcLocal.value = wcRoot;
+
+    const res = await api.svnInfo(wcRoot);
+    const stdout = res?.stdout || "";
+    const url = stdout.match(/^URL:\s*(.+)$/m)?.[1]?.trim();
+    const root = stdout.match(/^Repository Root:\s*(.+)$/m)?.[1]?.trim();
+    if (url && root && url.startsWith(root)) {
+      // 仓库根检出时 prefix 为空字符串；子目录检出时为 /trunk/xxx
+      let prefix = url.slice(root.length);
+      if (prefix && !prefix.startsWith("/")) prefix = `/${prefix}`;
+      historyRepoPrefix.value = prefix.replace(/\/$/, "");
+    } else {
+      historyRepoPrefix.value = "";
+    }
+  } catch {
+    historyRepoPrefix.value = "";
+  }
+}
+
+function resolveHistoryLocalPath(repoPath: string): string | null {
+  const rp = (repoPath || "").trim();
+  if (!rp) return null;
+  const normalized = (rp.startsWith("/") ? rp : `/${rp}`).replace(/\\/g, "/");
+  const pref = (historyRepoPrefix.value || "").replace(/\/$/, "");
+  const wc = (historyWcLocal.value || activeWorkspace.value?.path || "").replace(/\/$/, "");
+  if (wc) {
+    // pref 为空：工作副本就是仓库根，仓库路径整段拼到本地
+    if (!pref) {
+      const rel = normalized.replace(/^\//, "");
+      return rel ? `${wc}/${rel}` : wc;
+    }
+    if (normalized === pref || normalized.startsWith(`${pref}/`)) {
+      const rel = normalized.slice(pref.length).replace(/^\//, "");
+      return rel ? `${wc}/${rel}` : wc;
+    }
+  }
+  // 单文件历史：直接使用当前 historyRoot
+  const root = historyRoot.value;
+  if (root) {
+    const leaf = root.split("/").pop() || "";
+    if (leaf && (normalized.endsWith(`/${leaf}`) || normalized === `/${leaf}`)) {
+      return root;
+    }
+  }
+  return null;
+}
+
+async function onHistoryViewPath(payload: { entry: SvnLogEntry; path: SvnLogPath }) {
+  const entry = payload.entry;
+  const item = payload.path;
+  if ((item.kind || "").toLowerCase() === "dir") {
+    toast("目录不支持查看文本差异，可继续浏览提交详情", "info");
+    return;
+  }
+  const local = resolveHistoryLocalPath(item.path);
+  if (!local) {
+    toast(`无法映射本地路径：${item.path}`, "info");
+    return;
+  }
+  await openHistoryRevisionDiff(entry, item);
+}
+
+async function onHistoryViewRevision(entry: SvnLogEntry) {
+  await openHistoryRevisionDiff(entry, null);
 }
 
 async function actionTargets(entry: FsEntry | null): Promise<string[]> {
@@ -1255,7 +1389,7 @@ async function runAction(action: ContextAction) {
 
   if (action === "log") {
     if (multi) {
-      toast("查看日志仅支持单选", "info");
+      toast("查看历史仅支持单选", "info");
       return;
     }
     await openHistoryDialog(path);
@@ -1399,13 +1533,7 @@ async function runWorkspaceAction(action: WorkspaceAction) {
   }
 
   if (action === "log") {
-    const res = await withBusy(async () => api.svnLog(path, 50), "获取日志...");
-    if (res) {
-      showOutput(
-        `日志 · ${ws.name}`,
-        [res.stdout, res.stderr].filter(Boolean).join("\n") || "(无日志)",
-      );
-    }
+    await openHistoryDialog(path);
     return;
   }
 
@@ -1584,6 +1712,12 @@ function onGlobalKeydown(e: KeyboardEvent) {
     void openChangesDialog();
     return;
   }
+  // ⌘⇧H 提交历史
+  if (e.key.toLowerCase() === "h" && e.shiftKey) {
+    e.preventDefault();
+    void openHistoryDialog();
+    return;
+  }
 }
 
 async function maximizeAppWindow() {
@@ -1666,6 +1800,7 @@ onUnmounted(() => {
       @update="onToolbarUpdate"
       @commit="onToolbarCommit"
       @changes="openChangesDialog()"
+      @history="openHistoryDialog()"
       @copied="toast('已复制路径', 'success')"
       @copy-failed="(msg) => toast(msg || '复制失败', 'error')"
     />
@@ -1737,6 +1872,8 @@ onUnmounted(() => {
       @changes-action="onChangesAction"
       @refresh-changes="refreshChangesDialog"
       @history-select="selectHistoryEntry"
+      @history-view-path="onHistoryViewPath"
+      @history-view-revision="onHistoryViewRevision"
       @refresh-history="refreshHistoryDialog"
     />
 
@@ -1746,7 +1883,9 @@ onUnmounted(() => {
         :title="diffViewerTitle"
         :revision="diffViewerRevision"
         :revision-action="historySelectedAction"
-        @close="diffViewerOpen = false; diffViewerRevision = null"
+        :revision-files="diffViewerFiles"
+        :initial-path="diffViewerFocusPath"
+        @close="closeDiffViewer"
       />
     </div>
 

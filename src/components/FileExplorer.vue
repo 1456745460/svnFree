@@ -25,6 +25,7 @@ const emit = defineEmits<{
   update: [];
   commit: [];
   changes: [];
+  history: [];
   copied: [path: string];
   copyFailed: [message: string];
 }>();
@@ -361,6 +362,7 @@ onBeforeUnmount(() => {
             <button class="btn" :disabled="busy || !workspacePath" title="更新 (⌘U)" @click="emit('update')">更新</button>
             <button class="btn btn-primary" :disabled="busy || !workspacePath" title="提交 (⌘↩)" @click="emit('commit')">提交</button>
             <button class="btn" :disabled="busy || !workspacePath" title="查看本地变更 (⌘⇧C)" @click="emit('changes')">变更</button>
+            <button class="btn" :disabled="busy || !workspacePath" title="查看提交历史 (⌘⇧H)" @click="emit('history')">历史</button>
           </div>
           <div class="view-toggle">
             <button :class="{ active: viewMode === 'list' }" @click="emit('changeView', 'list')">列表</button>

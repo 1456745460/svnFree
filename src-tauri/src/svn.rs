@@ -221,6 +221,18 @@ pub struct DiffFileContent {
     pub message: Option<String>,
 }
 
+/// 仅行数统计（来自 svn diff 文本解析，无需 svn cat）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffFileStat {
+    pub path: String,
+    pub relative_path: String,
+    pub name: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub binary: bool,
+}
+
 fn run_svn(args: &[&str], cwd: Option<&Path>) -> Result<CommandResult, String> {
     let svn = svn_binary();
     let mut cmd = Command::new(svn);
@@ -784,11 +796,18 @@ pub fn commit(
         return run_svn(&["commit", "-m", msg, p.to_str().unwrap_or(&path)], None);
     }
 
-    // 先把未版本控制项 add 进去
+    // 提交前规范化：? 自动 add，!（磁盘缺失）自动 svn delete
+    // 否则 missing 项直接 commit 会被 SVN 静默跳过，幽灵状态一直残留
     for item in &selected {
         if let Ok(status) = status_of(item) {
-            if status.as_deref() == Some("?") {
-                let _ = add_paths(vec![item.clone()]);
+            match status.as_deref() {
+                Some("?") => {
+                    let _ = add_paths(vec![item.clone()]);
+                }
+                Some("!") => {
+                    let _ = delete_path(item.clone(), true);
+                }
+                _ => {}
             }
         }
     }
@@ -1349,8 +1368,17 @@ pub fn diff(path: String) -> Result<CommandResult, String> {
 pub fn log(path: String, limit: Option<u32>) -> Result<CommandResult, String> {
     let p = ensure_path_exists(&path)?;
     let limit_str = limit.unwrap_or(30).to_string();
+    // 默认按 HEAD 往回看，避免工作副本未 update 时看不到服务器新提交
     run_svn(
-        &["log", "-l", &limit_str, "-v", p.to_str().unwrap_or(&path)],
+        &[
+            "log",
+            "-r",
+            "HEAD:1",
+            "-l",
+            &limit_str,
+            "-v",
+            p.to_str().unwrap_or(&path),
+        ],
         None,
     )
 }
@@ -1508,6 +1536,8 @@ pub fn log_entries(path: String, limit: Option<u32>) -> Result<Vec<SvnLogEntry>,
             "log",
             "--xml",
             "-v",
+            "-r",
+            "HEAD:1",
             "-l",
             &limit_str,
             p.to_str().unwrap_or(&path),
@@ -1524,7 +1554,19 @@ pub fn log_entries(path: String, limit: Option<u32>) -> Result<Vec<SvnLogEntry>,
     parse_svn_log_xml(&res.stdout)
 }
 
+fn svn_info_cache() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 fn svn_show_item(path: &Path, item: &str) -> Result<String, String> {
+    let key = format!("{}\0{}", path.to_string_lossy(), item);
+    if let Ok(guard) = svn_info_cache().lock() {
+        if let Some(hit) = guard.get(&key) {
+            return Ok(hit.clone());
+        }
+    }
+
     let svn = svn_binary();
     let mut cmd = Command::new(svn);
     cmd.args([
@@ -1540,13 +1582,59 @@ fn svn_show_item(path: &Path, item: &str) -> Result<String, String> {
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    Ok(normalize_svn_text(
+    let value = normalize_svn_text(
         &String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+    );
+    if let Ok(mut guard) = svn_info_cache().lock() {
+        guard.insert(key, value.clone());
+    }
+    Ok(value)
 }
 
-fn svn_cat_revision_text(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), String> {
-    svn_cat_revision(path, rev)
+/// 并发执行两次 svn cat（旧修订 + 新修订），显著降低历史 Diff 等待时间
+fn svn_cat_pair(
+    url: &str,
+    old_rev: Option<&str>,
+    new_rev: Option<&str>,
+) -> Result<((bool, Vec<u8>, bool), (bool, Vec<u8>, bool)), String> {
+    let url_old = url.to_string();
+    let url_new = url.to_string();
+    let old_owned = old_rev.map(|s| s.to_string());
+    let new_owned = new_rev.map(|s| s.to_string());
+
+    match (old_owned, new_owned) {
+        (Some(o), Some(n)) => {
+            let h_old = thread::spawn(move || svn_cat_revision(Path::new(&url_old), &o));
+            let h_new = thread::spawn(move || svn_cat_revision(Path::new(&url_new), &n));
+            let old = h_old
+                .join()
+                .map_err(|_| "svn cat 旧版本线程失败".to_string())??;
+            let new = h_new
+                .join()
+                .map_err(|_| "svn cat 新版本线程失败".to_string())??;
+            Ok((old, new))
+        }
+        (Some(o), None) => {
+            let old = svn_cat_revision(Path::new(&url_old), &o)?;
+            Ok((old, (false, Vec::new(), false)))
+        }
+        (None, Some(n)) => {
+            let new = svn_cat_revision(Path::new(&url_new), &n)?;
+            Ok(((false, Vec::new(), false), new))
+        }
+        (None, None) => Ok(((false, Vec::new(), false), (false, Vec::new(), false))),
+    }
+}
+
+fn find_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 pub fn revision_diff_file_content(
@@ -1554,17 +1642,16 @@ pub fn revision_diff_file_content(
     revision: String,
     action: Option<String>,
 ) -> Result<DiffFileContent, String> {
-    let target = ensure_path_exists(&path)?;
-    if target.is_dir() {
+    let target = PathBuf::from(&path);
+    if target.exists() && target.is_dir() {
         return Err("目录无法展示历史 Diff".into());
     }
 
-    let root = find_wc_root(&target).unwrap_or_else(|| {
-        target
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| target.clone())
-    });
+    // 允许已删除/尚未 update 到本地的历史文件：沿父路径找到工作副本根
+    let probe = find_existing_ancestor(&target).ok_or_else(|| {
+        format!("路径不存在且无法定位工作副本: {path}")
+    })?;
+    let root = find_wc_root(&probe).unwrap_or_else(|| probe.clone());
     let relative = relative_to_root(&root, &target);
     let name = target
         .file_name()
@@ -1575,7 +1662,20 @@ pub fn revision_diff_file_content(
     let status = action.clone().unwrap_or_else(|| "M".into());
     let status_label = map_status_label(&status);
 
-    let url = svn_show_item(&target, "url")?;
+    // 优先用本地路径的 URL；不存在则用 WC 根 URL + 相对路径拼出文件 URL
+    let url = if target.exists() {
+        svn_show_item(&target, "url")?
+    } else {
+        let root_url = svn_show_item(&root, "url")?;
+        let rel = relative.replace('\\', "/").trim_start_matches('/').to_string();
+        if rel.is_empty() {
+            root_url
+        } else if root_url.ends_with('/') {
+            format!("{root_url}{rel}")
+        } else {
+            format!("{root_url}/{rel}")
+        }
+    };
     let rev_num = revision.trim();
     if rev_num.is_empty() {
         return Err("修订号不能为空".into());
@@ -1588,26 +1688,18 @@ pub fn revision_diff_file_content(
         }
     });
 
+    // 旧/新修订 svn cat 并发，历史 Diff 通常能接近减半等待时间
     let (old_exists, old_bytes, old_over, new_exists, new_bytes, new_over) = match status.as_str() {
         "A" => {
-            let new = svn_cat_revision_text(Path::new(&url), rev_num)?;
+            let (_old, new) = svn_cat_pair(&url, None, Some(rev_num))?;
             (false, Vec::new(), false, new.0, new.1, new.2)
         }
         "D" | "!" => {
-            let old = if let Some(prev) = prev_rev.as_deref() {
-                svn_cat_revision_text(Path::new(&url), prev)?
-            } else {
-                (false, Vec::new(), false)
-            };
+            let (old, _new) = svn_cat_pair(&url, prev_rev.as_deref(), None)?;
             (old.0, old.1, old.2, false, Vec::new(), false)
         }
         _ => {
-            let old = if let Some(prev) = prev_rev.as_deref() {
-                svn_cat_revision_text(Path::new(&url), prev)?
-            } else {
-                (false, Vec::new(), false)
-            };
-            let new = svn_cat_revision_text(Path::new(&url), rev_num)?;
+            let (old, new) = svn_cat_pair(&url, prev_rev.as_deref(), Some(rev_num))?;
             (old.0, old.1, old.2, new.0, new.1, new.2)
         }
     };
@@ -1660,6 +1752,158 @@ pub fn revision_diff_file_content(
         language,
         message: None,
     })
+}
+
+
+fn flush_diff_stat(
+    out: &mut Vec<DiffFileStat>,
+    root: Option<&Path>,
+    current_path: &mut Option<String>,
+    additions: &mut u32,
+    deletions: &mut u32,
+    binary: &mut bool,
+) {
+    let Some(raw) = current_path.take() else {
+        *additions = 0;
+        *deletions = 0;
+        *binary = false;
+        return;
+    };
+    let path = raw.trim().to_string();
+    if path.is_empty() {
+        *additions = 0;
+        *deletions = 0;
+        *binary = false;
+        return;
+    }
+    let path_buf = PathBuf::from(&path);
+    let name = path_buf
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&path)
+        .to_string();
+    let relative = if let Some(r) = root {
+        relative_to_root(r, &path_buf)
+    } else {
+        path.trim_start_matches('/').to_string()
+    };
+    out.push(DiffFileStat {
+        path,
+        relative_path: relative.replace('\\', "/"),
+        name,
+        additions: *additions,
+        deletions: *deletions,
+        binary: *binary,
+    });
+    *additions = 0;
+    *deletions = 0;
+    *binary = false;
+}
+
+/// 解析 `svn diff` 统一 diff 文本，统计每个文件的 +/- 行数（不含 ---/+++ 头）
+fn parse_svn_diff_stats(diff_text: &str, root: Option<&Path>) -> Vec<DiffFileStat> {
+    let mut out = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut additions: u32 = 0;
+    let mut deletions: u32 = 0;
+    let mut binary = false;
+
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix("Index: ") {
+            flush_diff_stat(
+                &mut out,
+                root,
+                &mut current_path,
+                &mut additions,
+                &mut deletions,
+                &mut binary,
+            );
+            current_path = Some(rest.trim().to_string());
+            continue;
+        }
+        // 某些版本/属性变更
+        if let Some(rest) = line.strip_prefix("Property changes on: ") {
+            // 若尚无 Index，用属性路径作为文件
+            if current_path.is_none() {
+                current_path = Some(rest.trim().to_string());
+            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("cannot display")
+            || lower.contains("binary file")
+            || lower.contains("file marked as a binary")
+            || lower.contains("(binary")
+        {
+            binary = true;
+            continue;
+        }
+        // unified hunk lines
+        if line.starts_with('+') && !line.starts_with("+++") {
+            additions = additions.saturating_add(1);
+            continue;
+        }
+        if line.starts_with('-') && !line.starts_with("---") {
+            deletions = deletions.saturating_add(1);
+            continue;
+        }
+    }
+    flush_diff_stat(
+        &mut out,
+        root,
+        &mut current_path,
+        &mut additions,
+        &mut deletions,
+        &mut binary,
+    );
+    out
+}
+
+/// 工作副本本地变更：一次 svn diff 拿全部文件 +/-（无需 cat）
+pub fn working_diff_stats(path: String) -> Result<Vec<DiffFileStat>, String> {
+    let target = ensure_path_exists(&path)?;
+    let root = find_wc_root(&target).unwrap_or_else(|| target.clone());
+    let res = run_svn(
+        &["diff", "--force", target.to_str().unwrap_or(&path)],
+        None,
+    )?;
+    // diff 失败但可能仍有 stdout
+    if !res.success && res.stdout.trim().is_empty() {
+        return Err(if res.stderr.trim().is_empty() {
+            "读取 diff 统计失败".into()
+        } else {
+            res.stderr
+        });
+    }
+    Ok(parse_svn_diff_stats(&res.stdout, Some(&root)))
+}
+
+/// 历史提交：一次 svn diff -c REV 拿该次提交全部文件 +/-（无需 cat）
+pub fn revision_diff_stats(path: String, revision: String) -> Result<Vec<DiffFileStat>, String> {
+    let target = ensure_path_exists(&path)?;
+    let root = find_wc_root(&target).unwrap_or_else(|| target.clone());
+    let rev = revision.trim();
+    if rev.is_empty() {
+        return Err("修订号不能为空".into());
+    }
+    let res = run_svn(
+        &[
+            "diff",
+            "-c",
+            rev,
+            "--force",
+            target.to_str().unwrap_or(&path),
+        ],
+        None,
+    )?;
+    if !res.success && res.stdout.trim().is_empty() {
+        return Err(if res.stderr.trim().is_empty() {
+            "读取历史 diff 统计失败".into()
+        } else {
+            res.stderr
+        });
+    }
+    Ok(parse_svn_diff_stats(&res.stdout, Some(&root)))
 }
 
 pub fn proplist(path: String) -> Result<CommandResult, String> {
@@ -1945,6 +2189,71 @@ fn find_wc_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+fn extension_looks_unsupported(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if name == ".ds_store" || name == "thumbs.db" || name == "desktop.ini" {
+        return true;
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "xlsm"
+            | "ppt"
+            | "pptx"
+            | "zip"
+            | "rar"
+            | "7z"
+            | "tar"
+            | "gz"
+            | "tgz"
+            | "jar"
+            | "war"
+            | "ear"
+            | "class"
+            | "o"
+            | "so"
+            | "dll"
+            | "dylib"
+            | "exe"
+            | "bin"
+            | "ttf"
+            | "otf"
+            | "woff"
+            | "woff2"
+            | "mp3"
+            | "mp4"
+            | "wav"
+            | "avi"
+            | "mov"
+            | "mkv"
+            | "psd"
+            | "ai"
+    )
+}
+
 fn detect_binary(path: &Path, status_code: &str) -> Result<bool, String> {
     if path.is_dir() {
         return Ok(false);
@@ -2031,7 +2340,13 @@ pub fn diff_files(path: String) -> Result<Vec<DiffFileInfo>, String> {
             continue;
         }
         let full = PathBuf::from(&item.path);
+        if extension_looks_unsupported(&full) {
+            continue;
+        }
         if let Ok(info) = build_file_info_from_path(&root, &full, &item.status) {
+            if info.is_dir || info.binary {
+                continue;
+            }
             files.push(info);
         }
     }

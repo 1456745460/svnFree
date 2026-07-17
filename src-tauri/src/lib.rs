@@ -244,6 +244,16 @@ fn svn_revision_diff_file_content(
 }
 
 #[tauri::command]
+fn svn_working_diff_stats(path: String) -> Result<Vec<svn::DiffFileStat>, String> {
+    svn::working_diff_stats(path)
+}
+
+#[tauri::command]
+fn svn_revision_diff_stats(path: String, revision: String) -> Result<Vec<svn::DiffFileStat>, String> {
+    svn::revision_diff_stats(path, revision)
+}
+
+#[tauri::command]
 fn svn_proplist(path: String) -> Result<CommandResult, String> {
     svn::proplist(path)
 }
@@ -305,6 +315,8 @@ pub fn run() {
             svn_log,
             svn_log_entries,
             svn_revision_diff_file_content,
+            svn_working_diff_stats,
+            svn_revision_diff_stats,
             svn_proplist,
             svn_info,
             reveal_in_finder,

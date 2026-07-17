@@ -153,6 +153,16 @@ export interface DiffFileInfo {
   deletions?: number;
 }
 
+/** 来自 svn diff 文本解析的 +/- 行统计（无需 cat） */
+export interface DiffFileStat {
+  path: string;
+  relativePath: string;
+  name: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 export interface DiffFileContent {
   path: string;
   relativePath: string;

@@ -233,7 +233,7 @@ const statusLabel = computed(() => {
       <button v-if="canDiff" type="button" @click="actFile('diff', $event)">查看差异 (DIFF)</button>
       <button v-if="canPatch" type="button" @click="actFile('patch', $event)">导出补丁 (Patch)</button>
       <button v-if="canBlame" type="button" @click="actFile('blame', $event)">注解 (Blame)</button>
-      <button v-if="canLog" type="button" @click="actFile('log', $event)">查看日志</button>
+      <button v-if="canLog" type="button" @click="actFile('log', $event)">查看历史</button>
       <button v-if="canInfo" type="button" @click="actFile('info', $event)">属性 / 信息</button>
       <button v-if="canProplist" type="button" @click="actFile('proplist', $event)">查看 SVN 属性</button>
       <button type="button" @click="actFile('reveal', $event)">在 Finder 中显示</button>
@@ -256,7 +256,7 @@ const statusLabel = computed(() => {
       <button type="button" @click="actWs('commit', $event)">提交... <span class="kbd">⌘↩</span></button>
       <button type="button" @click="actWs('diff', $event)">查看差异 (DIFF)</button>
       <button type="button" @click="actWs('patch', $event)">导出补丁 (Patch)</button>
-      <button type="button" @click="actWs('log', $event)">查看日志</button>
+      <button type="button" @click="actWs('log', $event)">查看历史</button>
       <button type="button" @click="actWs('info', $event)">属性 / 信息</button>
       <button type="button" @click="actWs('switch', $event)">切换地址 (Switch)...</button>
       <button type="button" @click="actWs('reveal', $event)">在 Finder 中显示</button>

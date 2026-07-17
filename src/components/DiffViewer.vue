@@ -18,12 +18,17 @@ import {
   type UnifiedRow,
 } from "../utils/diffEngine";
 import { highlightCode } from "../utils/codeHighlight";
+import { filterDiffableFiles, isUnsupportedDiffPath } from "../utils/diffSupport";
 
 const props = defineProps<{
   rootPath: string;
   title?: string;
   revision?: string | null;
   revisionAction?: string | null;
+  /** 历史提交时由外部传入的完整变更文件列表 */
+  revisionFiles?: DiffFileInfo[] | null;
+  /** 打开时优先选中的文件本地路径 */
+  initialPath?: string | null;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -83,6 +88,15 @@ function writePref(key: string, value: string) {
 
 const loading = ref(true);
 const loadingFile = ref(false);
+/** 取消过期的列表加载 / 后台统计 */
+let loadToken = 0;
+let statsToken = 0;
+/** 已加载过的文件内容缓存，避免来回点击重复 cat */
+const contentCache = new Map<string, DiffFileContent>();
+
+function contentCacheKey(path: string) {
+  return `${props.revision || "wc"}::${path}`;
+}
 const error = ref("");
 const files = ref<Array<DiffFileInfo & { additions: number; deletions: number }>>([]);
 const selectedPath = ref<string | null>(null);
@@ -256,47 +270,118 @@ function codeHtml(maps: { oldMap: Map<number, string>; newMap: Map<number, strin
 }
 
 async function loadFiles() {
+  const token = ++loadToken;
+  statsToken += 1; // 取消旧的后台统计
+  contentCache.clear();
   loading.value = true;
   error.value = "";
   try {
-    const list = await api.svnDiffFiles(props.rootPath);
-    const enriched: Array<DiffFileInfo & { additions: number; deletions: number }> = [];
-    for (const item of list) {
-      if (item.binary || item.isDir) {
-        enriched.push({ ...item, additions: 0, deletions: 0 });
-        continue;
-      }
-      try {
-        const content = props.revision
-          ? await api.svnRevisionDiffFileContent(item.path, props.revision, props.revisionAction || item.status)
-          : await api.svnDiffFileContent(item.path);
-        if (content.binary) {
-          enriched.push({ ...item, binary: true, additions: 0, deletions: 0 });
-        } else {
-          const built = buildLineDiff(content.oldText, content.newText);
-          enriched.push({
-            ...item,
-            additions: built.stats.additions,
-            deletions: built.stats.deletions,
-          });
-        }
-      } catch {
-        enriched.push({ ...item, additions: 0, deletions: 0 });
-      }
-    }
-    files.value = enriched;
-    if (enriched.length) {
-      await selectFile(enriched[0].path, true);
+    // 历史提交：优先使用外部传入的该次提交完整文件列表
+    const list =
+      props.revision && props.revisionFiles && props.revisionFiles.length
+        ? props.revisionFiles.map((f) => ({ ...f }))
+        : await api.svnDiffFiles(props.rootPath);
+    if (token !== loadToken) return;
+
+    // 排除目录 / 二进制扩展等无法文本 Diff 的项
+    const diffable = filterDiffableFiles(list);
+    // 先立刻展示文件列表（不预拉全部内容），避免 N 个文件串行 svn cat 卡死
+    const baseList: Array<DiffFileInfo & { additions: number; deletions: number }> = diffable.map((item) => ({
+      ...item,
+      additions: item.additions || 0,
+      deletions: item.deletions || 0,
+    }));
+    files.value = baseList;
+    loading.value = false;
+
+    if (baseList.length) {
+      const preferred =
+        (props.initialPath && baseList.find((f) => f.path === props.initialPath)?.path) ||
+        baseList[0].path;
+      // 列表 +/- 用一次 svn diff 解析（无需 cat）；内容仍懒加载
+      const statsPromise = loadLineStatsWithoutCat(token);
+      await selectFile(preferred, true);
+      if (token !== loadToken) return;
+      await statsPromise;
     } else {
       selectedPath.value = null;
       fileContent.value = null;
       builtDiff.value = null;
+      if (list.length) {
+        error.value = "本次变更仅包含无法文本对比的文件（如图片、Office、压缩包等）";
+      }
     }
   } catch (e: any) {
+    if (token !== loadToken) return;
     error.value = e?.message || String(e) || "加载 DIFF 失败";
     files.value = [];
   } finally {
-    loading.value = false;
+    if (token === loadToken) loading.value = false;
+  }
+}
+
+function normalizeDiffPath(p: string) {
+  return (p || "").replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function matchStatForFile(
+  filePath: string,
+  relativePath: string,
+  stats: Array<{ path: string; relativePath: string; name?: string; additions: number; deletions: number; binary: boolean }>,
+) {
+  const fp = normalizeDiffPath(filePath);
+  const rel = normalizeDiffPath(relativePath);
+  const base = fp.split("/").pop() || "";
+  return (
+    stats.find((s) => normalizeDiffPath(s.path) === fp) ||
+    stats.find((s) => {
+      const sp = normalizeDiffPath(s.path);
+      return sp.endsWith("/" + rel) || sp.endsWith(rel) || fp.endsWith("/" + normalizeDiffPath(s.relativePath));
+    }) ||
+    stats.find((s) => normalizeDiffPath(s.relativePath) === rel) ||
+    (base
+      ? stats.find(
+          (s) =>
+            normalizeDiffPath(s.path).endsWith("/" + base) ||
+            (s.name || "").toLowerCase() === base.toLowerCase(),
+        )
+      : undefined)
+  );
+}
+
+function applyLineStats(
+  stats: Array<{ path: string; relativePath: string; name: string; additions: number; deletions: number; binary: boolean }>,
+) {
+  if (!stats.length) return;
+  const next = files.value.map((f) => {
+    const hit = matchStatForFile(f.path, f.relativePath || "", stats);
+    if (!hit) return f;
+    if (hit.binary) {
+      return { ...f, binary: true, additions: 0, deletions: 0 };
+    }
+    return {
+      ...f,
+      additions: hit.additions || 0,
+      deletions: hit.deletions || 0,
+    };
+  });
+  // 去掉 diff 判定为二进制的项
+  const selected = selectedPath.value;
+  files.value = next.filter((f) => !f.binary && !isUnsupportedDiffPath(f.path, { binary: f.binary, isDir: f.isDir }));
+  if (selected && !files.value.some((f) => f.path === selected)) {
+    selectedPath.value = files.value[0]?.path || null;
+  }
+}
+
+async function loadLineStatsWithoutCat(parentToken: number) {
+  try {
+    const stats = props.revision
+      ? await api.svnRevisionDiffStats(props.rootPath, props.revision)
+      : await api.svnWorkingDiffStats(props.rootPath);
+    if (parentToken !== loadToken) return;
+    applyLineStats(stats || []);
+  } catch {
+    // 统计失败不影响查看内容
   }
 }
 
@@ -308,28 +393,51 @@ async function selectFile(path: string, force = false) {
   expandedHunks.value = new Set();
   currentDiffIndex.value = -1;
   try {
-    const content = props.revision
-      ? await api.svnRevisionDiffFileContent(
-          path,
-          props.revision,
-          props.revisionAction || files.value.find((f) => f.path === path)?.status,
-        )
-      : await api.svnDiffFileContent(path);
-    fileContent.value = content;
-    if (content.binary || content.message) {
-      builtDiff.value = null;
-    } else {
-      builtDiff.value = buildLineDiff(content.oldText, content.newText);
-      // update list stats
-      const idx = files.value.findIndex((f) => f.path === path);
-      if (idx >= 0 && builtDiff.value) {
-        files.value[idx] = {
-          ...files.value[idx],
-          additions: builtDiff.value.stats.additions,
-          deletions: builtDiff.value.stats.deletions,
-          binary: false,
-        };
+    const cacheKey = contentCacheKey(path);
+    let content = contentCache.get(cacheKey);
+    if (!content) {
+      content = props.revision
+        ? await api.svnRevisionDiffFileContent(
+            path,
+            props.revision,
+            files.value.find((f) => f.path === path)?.status || props.revisionAction,
+          )
+        : await api.svnDiffFileContent(path);
+      // 仅缓存可展示文本，避免占内存过大的二进制
+      if (!content.binary && !(content.message && /过大|二进制/.test(content.message || ""))) {
+        contentCache.set(cacheKey, content);
       }
+    }
+    fileContent.value = content;
+    // 不支持文本 Diff 的文件不保留在列表中
+    if (
+      content.binary ||
+      (content.message && /二进制|过大|无法展示|目录无法/.test(content.message)) ||
+      isUnsupportedDiffPath(path, { binary: content.binary })
+    ) {
+      const next = removeUnsupportedFile(path);
+      builtDiff.value = null;
+      fileContent.value = null;
+      if (next) {
+        await selectFile(next, true);
+        return;
+      }
+      error.value = "没有可展示的文本差异文件";
+      await nextTick();
+      collectAnchors();
+      updateDiffConnectors();
+      return;
+    }
+
+    builtDiff.value = buildLineDiff(content.oldText, content.newText);
+    const idx = files.value.findIndex((f) => f.path === path);
+    if (idx >= 0 && builtDiff.value) {
+      files.value[idx] = {
+        ...files.value[idx],
+        additions: builtDiff.value.stats.additions,
+        deletions: builtDiff.value.stats.deletions,
+        binary: false,
+      };
     }
     await nextTick();
     collectAnchors();
@@ -341,6 +449,20 @@ async function selectFile(path: string, force = false) {
   } finally {
     loadingFile.value = false;
   }
+}
+
+/** 从变更列表移除不支持 Diff 的文件，返回下一个可选项路径 */
+function removeUnsupportedFile(path: string): string | null {
+  const idx = files.value.findIndex((f) => f.path === path);
+  if (idx < 0) {
+    return files.value[0]?.path || null;
+  }
+  const next = files.value[idx + 1]?.path || files.value[idx - 1]?.path || null;
+  files.value = files.value.filter((f) => f.path !== path);
+  if (selectedPath.value === path) {
+    selectedPath.value = next;
+  }
+  return next;
 }
 
 const highlightMaps = computed(() => {
@@ -683,7 +805,7 @@ watch([syncScroll, showPath, fontFamily, fontSize], () => {
 });
 
 watch(
-  () => [props.rootPath, props.revision],
+  () => [props.rootPath, props.revision, props.revisionFiles, props.initialPath],
   () => {
     void loadFiles();
   },
@@ -724,7 +846,7 @@ watch(builtDiff, async () => {
           <span class="dv-brand-mark">◈</span>
           <div class="dv-brand-text">
             <strong>{{ rootLabel }}</strong>
-            <span class="dv-muted">BASE · 工作副本</span>
+            <span class="dv-muted">{{ revision ? `历史修订 r${revision}` : "BASE · 工作副本" }}</span>
           </div>
         </div>
         <div class="dv-top-actions">
@@ -855,7 +977,7 @@ watch(builtDiff, async () => {
         <div v-else-if="!selectedFile" class="dv-welcome">
           <div class="dv-welcome-card">
             <h1>选择左侧文件查看差异</h1>
-            <p>对比「BASE 版本」与「工作副本」内容，参考 Session Diff 并排/统一查看器。</p>
+            <p>历史模式对比「上一修订」与「该次提交」；本地模式对比「BASE」与「工作副本」。</p>
           </div>
         </div>
         <div v-else-if="fileContent?.binary || fileContent?.message" class="dv-binary-note">
@@ -924,12 +1046,12 @@ watch(builtDiff, async () => {
           <template v-else>
             <div class="dv-pane-labels split-labels">
               <div class="dv-pane-label">
-                <strong>BASE</strong>
+                <strong>{{ revision ? `r${Math.max(1, Number(revision) - 1)}` : "BASE" }}</strong>
                 {{ fileContent?.relativePath || selectedFile.path }}
               </div>
               <div class="dv-pane-label-gap" aria-hidden="true"></div>
               <div class="dv-pane-label">
-                <strong>工作副本</strong>
+                <strong>{{ revision ? `r${revision}` : "工作副本" }}</strong>
                 {{ fileContent?.relativePath || selectedFile.path }}
               </div>
             </div>

@@ -1428,7 +1428,8 @@ body.col-resizing * {
 }
 
 .history-list .history-row {
-  grid-template-columns: 74px minmax(0, 1.4fr) minmax(180px, 0.9fr) minmax(120px, 0.7fr);
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: start;
   cursor: pointer;
   text-align: left;
   border: 0;
@@ -1436,14 +1437,32 @@ body.col-resizing * {
   color: inherit;
   width: 100%;
   font: inherit;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .history-list .history-row.active {
   background: color-mix(in srgb, var(--accent-soft) 20%, var(--bg-hover));
 }
 
+.history-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .history-list .history-row .history-message {
   font-family: inherit;
+  white-space: normal !important;
+  overflow: hidden;
+  text-overflow: unset;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+  line-height: 1.45;
+  max-width: none;
 }
 
 .history-list .history-row .history-meta {
@@ -1456,6 +1475,253 @@ body.col-resizing * {
   background: #0f172a;
   color: #e2e8f0;
 }
+
+/* ===== 提交历史弹窗：上下各半 + 可拖拽分隔 ===== */
+.modal.history-modal {
+  width: min(1280px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  height: min(880px, calc(100vh - 24px));
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 覆盖 commit-modal body 默认 overflow:auto，杜绝双滚动条 */
+.modal.history-modal.commit-modal .modal-body,
+.modal.history-modal .modal-body {
+  max-height: none;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 12px;
+}
+
+.history-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+
+.history-path-field {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+}
+
+.history-layout {
+  --history-top-pct: 50%;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.history-top {
+  flex: 0 0 var(--history-top-pct);
+  max-height: var(--history-top-pct);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.history-splitter {
+  flex: 0 0 10px;
+  position: relative;
+  cursor: row-resize;
+  user-select: none;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 0;
+}
+
+.history-splitter::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+}
+
+.history-splitter-grip {
+  position: relative;
+  z-index: 1;
+  width: 42px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-secondary) 35%, var(--border));
+}
+
+.history-splitter:hover::before,
+.history-layout.splitting .history-splitter::before {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 55%, var(--border));
+}
+
+.history-splitter:hover .history-splitter-grip,
+.history-layout.splitting .history-splitter-grip {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 70%, var(--border));
+}
+
+body.is-resizing-history-split {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+.modal.history-modal .modal-header,
+.modal.history-modal .modal-footer {
+  flex: 0 0 auto;
+}
+
+
+.history-bottom {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding-top: 4px;
+}
+
+.history-bottom-empty {
+  justify-content: center;
+}
+
+.history-top .commit-list-head,
+.history-files-field .commit-list-head,
+.history-detail-head,
+.history-msg-field {
+  flex: 0 0 auto;
+}
+
+/* 仅列表内部滚动 */
+.history-top .history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.history-files-field {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-bottom: 0;
+}
+
+.history-path-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.history-msg-field {
+  margin-bottom: 0;
+}
+
+.history-message-box {
+  max-height: 72px;
+}
+
+.history-detail-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-soft) 70%, transparent);
+}
+
+.history-detail-rev {
+  font-weight: 650;
+  font-size: 14px;
+}
+
+.history-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.history-message-box {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-soft) 55%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  max-height: 88px;
+  overflow: auto;
+}
+
+.history-path-list .history-path-row {
+  grid-template-columns: 42px minmax(120px, 0.4fr) minmax(0, 1.6fr) auto;
+  cursor: pointer;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  font: inherit;
+}
+
+.history-path-list .history-path-row:hover {
+  background: var(--bg-hover);
+}
+
+.history-path-name {
+  font-weight: 560;
+}
+
+.history-path-full {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-empty.compact {
+  padding: 12px;
+}
+
+.history-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-footer-tip {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-footer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 
 .commit-empty {
   border: 1px dashed var(--border);
@@ -2089,11 +2355,14 @@ body.col-resizing * {
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-soft);
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .dv-sidebar-header {
+  flex: 0 0 auto;
   padding: 12px;
   border-bottom: 1px solid var(--border-soft);
   display: flex;
@@ -2117,7 +2386,11 @@ body.col-resizing * {
 }
 
 .dv-file-list {
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   display: flex;
   flex-direction: column;
