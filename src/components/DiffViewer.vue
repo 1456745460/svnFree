@@ -9,6 +9,7 @@ import {
   buildLineDiff,
   collapseRows,
   escapeHtml,
+  normalizeDiffText,
   resolveHighlightLang,
   splitName,
   statusClass,
@@ -403,6 +404,14 @@ async function selectFile(path: string, force = false) {
             files.value.find((f) => f.path === path)?.status || props.revisionAction,
           )
         : await api.svnDiffFileContent(path);
+      // 统一换行后再缓存/对比，避免 BASE(LF) 与工作副本(CRLF) 导致整文件误判
+      if (!content.binary) {
+        content = {
+          ...content,
+          oldText: normalizeDiffText(content.oldText || ""),
+          newText: normalizeDiffText(content.newText || ""),
+        };
+      }
       // 仅缓存可展示文本，避免占内存过大的二进制
       if (!content.binary && !(content.message && /过大|二进制/.test(content.message || ""))) {
         contentCache.set(cacheKey, content);

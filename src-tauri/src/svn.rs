@@ -60,6 +60,39 @@ fn normalize_svn_text(input: &str) -> String {
     decode_svn_unicode_escapes(input)
 }
 
+/// 文本 Diff 用：去掉 BOM，并把 CRLF / 孤立 CR 统一为 LF。
+/// 否则 svn cat(BASE, 常为 LF) 与工作副本(常为 CRLF) 逐行比对会整文件“全删全加”。
+fn normalize_diff_text(input: &str) -> String {
+    let s = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if !s.as_bytes().contains(&b'\r') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                out.push('\n');
+                i += 2;
+            } else {
+                out.push('\n');
+                i += 1;
+            }
+        } else {
+            // 安全：仅按字节扫描 \r，其余按 char 追加以保留 UTF-8
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn bytes_to_diff_text(bytes: &[u8]) -> String {
+    normalize_diff_text(&String::from_utf8_lossy(bytes))
+}
+
 fn svn_binary() -> &'static str {
     static SVN_BIN: OnceLock<String> = OnceLock::new();
     SVN_BIN
@@ -1270,8 +1303,17 @@ pub fn create_patch(path: String) -> Result<CommandResult, String> {
 }
 
 pub fn revert(path: String) -> Result<CommandResult, String> {
-    let p = ensure_path_exists(&path)?;
-    run_svn(&["revert", "-R", p.to_str().unwrap_or(&path)], None)
+    let p = PathBuf::from(&path);
+    let path_str = p.to_str().unwrap_or(&path).to_string();
+    // 已版本控制但磁盘缺失 / 已 schedule delete（status ! / D）时仍允许 revert 恢复
+    if !p.exists() {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(format!("路径不存在: {path}"));
+            }
+        }
+    }
+    run_svn(&["revert", "-R", &path_str], None)
 }
 
 pub fn clean(path: String) -> Result<CommandResult, String> {
@@ -1738,12 +1780,12 @@ pub fn revision_diff_file_content(
         status_label,
         binary: false,
         old_text: if old_exists {
-            String::from_utf8_lossy(&old_bytes).to_string()
+            bytes_to_diff_text(&old_bytes)
         } else {
             String::new()
         },
         new_text: if new_exists {
-            String::from_utf8_lossy(&new_bytes).to_string()
+            bytes_to_diff_text(&new_bytes)
         } else {
             String::new()
         },
@@ -2437,12 +2479,12 @@ pub fn diff_file_content(path: String) -> Result<DiffFileContent, String> {
     }
 
     let old_text = if old_exists {
-        String::from_utf8_lossy(&old_bytes).to_string()
+        bytes_to_diff_text(&old_bytes)
     } else {
         String::new()
     };
     let new_text = if new_exists {
-        String::from_utf8_lossy(&new_bytes).to_string()
+        bytes_to_diff_text(&new_bytes)
     } else {
         String::new()
     };
@@ -2471,6 +2513,14 @@ pub fn is_svn_working_copy(path: String) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_diff_text_strips_crlf_and_bom() {
+        let crlf = "\u{feff}line1\r\nline2\r\nline3\r";
+        assert_eq!(normalize_diff_text(crlf), "line1\nline2\nline3\n");
+        assert_eq!(normalize_diff_text("a\nb\n"), "a\nb\n");
+        assert_eq!(bytes_to_diff_text(b"x\r\ny\n"), "x\ny\n");
+    }
 
     #[test]
     fn decode_svn_unicode_path_escapes() {

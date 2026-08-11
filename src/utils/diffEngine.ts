@@ -31,6 +31,19 @@ export type RenderBlock =
   | { kind: "row"; row: any; index: number }
   | { kind: "hunk"; hidden: number; from: number; to: number };
 
+/**
+ * 统一文本再做 Diff，避免 SVN BASE(常为 LF) 与工作副本(常为 CRLF) 导致
+ * 整文件被 diffLines 判成“全删 + 全加”。
+ */
+export function normalizeDiffText(text: string): string {
+  if (!text) return "";
+  let s = text;
+  // UTF-8 BOM
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+  // CRLF / 孤立 CR → LF
+  return s.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 function pairSideBySide(rows: SideBySideRow[]): SideBySideRow[] {
   const result: SideBySideRow[] = [];
   let i = 0;
@@ -70,7 +83,10 @@ function pairSideBySide(rows: SideBySideRow[]): SideBySideRow[] {
 }
 
 export function buildLineDiff(oldText: string, newText: string): BuiltDiff {
-  const parts = diffLines(oldText, newText);
+  // 规范化换行后再 diff；stripTrailingCr 作为双保险（与 GNU diff 行为一致）
+  const left = normalizeDiffText(oldText);
+  const right = normalizeDiffText(newText);
+  const parts = diffLines(left, right, { stripTrailingCr: true });
   const unified: UnifiedRow[] = [];
   const sideBySide: SideBySideRow[] = [];
   let oldLine = 1;
