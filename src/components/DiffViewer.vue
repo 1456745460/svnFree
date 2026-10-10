@@ -412,8 +412,8 @@ async function selectFile(path: string, force = false) {
           newText: normalizeDiffText(content.newText || ""),
         };
       }
-      // 仅缓存可展示文本，避免占内存过大的二进制
-      if (!content.binary && !(content.message && /过大|二进制/.test(content.message || ""))) {
+      // 仅缓存可展示文本，避免占内存过大的二进制/超长文件
+      if (!content.binary && !(content.message && /过大|二进制|超过.*行/.test(content.message || ""))) {
         contentCache.set(cacheKey, content);
       }
     }
@@ -421,7 +421,7 @@ async function selectFile(path: string, force = false) {
     // 不支持文本 Diff 的文件不保留在列表中
     if (
       content.binary ||
-      (content.message && /二进制|过大|无法展示|目录无法/.test(content.message)) ||
+      (content.message && /二进制|过大|无法展示|目录无法|超过.*行/.test(content.message)) ||
       isUnsupportedDiffPath(path, { binary: content.binary })
     ) {
       const next = removeUnsupportedFile(path);

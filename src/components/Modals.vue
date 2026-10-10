@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ProgressState, SvnLogEntry, SvnLogPath, SvnStatusItem } from "../types";
 import { canRevertSvnStatus, getSvnStatusMeta } from "../utils/materialIcon";
+import { isUnsupportedDiffPath } from "../utils/diffSupport";
 
 const props = defineProps<{
   type: "checkout" | "commit" | "output" | "rename" | "switch" | "changes" | "history" | null;
@@ -30,9 +31,10 @@ const emit = defineEmits<{
   closeProgress: [];
   checkout: [payload: { url: string; path: string; name?: string }];
   commit: [payload: { message: string; paths: string[] }];
+  commitAction: [payload: { action: "diff" | "diffAll"; path: string }];
   rename: [newName: string];
   switch: [payload: { url: string }];
-  changesAction: [payload: { action: "diff" | "revert" | "commit" | "reveal"; path: string }];
+  changesAction: [payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal"; path: string }];
   refreshChanges: [];
   historySelect: [entry: SvnLogEntry];
   historyViewPath: [payload: { entry: SvnLogEntry; path: SvnLogPath }];
@@ -158,6 +160,14 @@ async function pickCheckoutDirectory() {
 
 function statusMeta(code: string) {
   return getSvnStatusMeta(code);
+}
+
+/** 判断某项是否可以做文本 diff（非目录、非二进制、扩展名支持） */
+function canDiffItem(item: { path: string; isDir?: boolean; binary?: boolean; status?: string }) {
+  // 新增（A）状态没有旧文本，diff 意义不大但仍可展示为新增文件
+  if (item.status === "D") return true;
+  if (item.status === "A") return true;
+  return !isUnsupportedDiffPath(item.path, { isDir: item.isDir, binary: item.binary });
 }
 
 function resetChecked(items: SvnStatusItem[] = []) {
@@ -334,28 +344,39 @@ function submitSwitch() {
               <input type="checkbox" :checked="allChecked" :disabled="busy" @change="toggleAll(($event.target as HTMLInputElement).checked)" />
               <span>全部变更</span>
             </label>
-            <label
+            <div
               v-for="item in commitItems"
               :key="item.path"
-              class="commit-file-row"
+              class="commit-file-row commit-row-with-actions"
               :title="item.path"
             >
-              <input
-                type="checkbox"
-                :checked="!!checked[item.path]"
-                :disabled="busy"
-                @change="toggleOne(item.path, ($event.target as HTMLInputElement).checked)"
-              />
-              <span
-                v-if="statusMeta(item.status)"
-                class="status-badge"
-                :class="statusMeta(item.status)!.className"
-                :title="statusMeta(item.status)!.label"
-              >{{ statusMeta(item.status)!.code }}</span>
-              <span v-else class="status-badge other">?</span>
-              <span class="commit-file-name">{{ item.relativePath || item.name }}</span>
-              <span class="tiny muted">{{ item.isDir ? "文件夹" : "文件" }}</span>
-            </label>
+              <label class="commit-file-check">
+                <input
+                  type="checkbox"
+                  :checked="!!checked[item.path]"
+                  :disabled="busy"
+                  @change="toggleOne(item.path, ($event.target as HTMLInputElement).checked)"
+                />
+                <span
+                  v-if="statusMeta(item.status)"
+                  class="status-badge"
+                  :class="statusMeta(item.status)!.className"
+                  :title="statusMeta(item.status)!.label"
+                >{{ statusMeta(item.status)!.code }}</span>
+                <span v-else class="status-badge other">?</span>
+                <span class="commit-file-name">{{ item.relativePath || item.name }}</span>
+                <span class="tiny muted">{{ item.isDir ? "文件夹" : "文件" }}</span>
+              </label>
+              <div class="changes-actions">
+                <button
+                  v-if="canDiffItem(item)"
+                  type="button"
+                  class="btn btn-ghost tiny-btn"
+                  :disabled="busy"
+                  @click.stop="emit('commitAction', { action: 'diff', path: item.path })"
+                >DIFF</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -374,6 +395,11 @@ function submitSwitch() {
       </div>
       <div class="modal-footer">
         <button class="btn" :disabled="busy" @click="emit('close')">取消</button>
+        <button
+          class="btn"
+          :disabled="busy || commitLoading || !(commitItems || []).length"
+          @click="emit('commitAction', { action: 'diffAll', path: commitRoot || '' })"
+        >查看所有 diff</button>
         <button
           class="btn btn-primary"
           :disabled="busy || commitLoading || !message.trim() || !selectedCount"
@@ -508,6 +534,7 @@ function submitSwitch() {
       </div>
       <div class="modal-footer">
         <button class="btn" :disabled="busy" @click="emit('close')">关闭</button>
+        <button class="btn" :disabled="busy || !(changesItems || []).length" @click="emit('changesAction', { action: 'diffAll', path: changesRoot || '' })">查看所有 diff</button>
         <button class="btn btn-primary" :disabled="busy || !(changesItems || []).length" @click="emit('changesAction', { action: 'commit', path: changesRoot || '' })">去提交...</button>
       </div>
     </div>

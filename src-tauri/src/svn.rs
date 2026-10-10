@@ -93,6 +93,27 @@ fn bytes_to_diff_text(bytes: &[u8]) -> String {
     normalize_diff_text(&String::from_utf8_lossy(bytes))
 }
 
+/// Diff 文本最大行数，超过则直接拒绝（不请求 svn / 不做行级 diff），避免卡死或超长等待。
+const MAX_DIFF_LINES: usize = 2000;
+
+/// 快速统计字节流中的行数（按 \n 计数），不转 String。
+fn count_lines(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut count = 0;
+    for &b in bytes {
+        if b == b'\n' {
+            count += 1;
+        }
+    }
+    // 末尾无换行符时最后一行也要计入
+    if !bytes.ends_with(b"\n") {
+        count += 1;
+    }
+    count
+}
+
 fn svn_binary() -> &'static str {
     static SVN_BIN: OnceLock<String> = OnceLock::new();
     SVN_BIN
@@ -1638,7 +1659,7 @@ fn svn_cat_pair(
     url: &str,
     old_rev: Option<&str>,
     new_rev: Option<&str>,
-) -> Result<((bool, Vec<u8>, bool), (bool, Vec<u8>, bool)), String> {
+) -> Result<((bool, Vec<u8>, bool, bool), (bool, Vec<u8>, bool, bool)), String> {
     let url_old = url.to_string();
     let url_new = url.to_string();
     let old_owned = old_rev.map(|s| s.to_string());
@@ -1658,13 +1679,13 @@ fn svn_cat_pair(
         }
         (Some(o), None) => {
             let old = svn_cat_revision(Path::new(&url_old), &o)?;
-            Ok((old, (false, Vec::new(), false)))
+            Ok((old, (false, Vec::new(), false, false)))
         }
         (None, Some(n)) => {
             let new = svn_cat_revision(Path::new(&url_new), &n)?;
-            Ok(((false, Vec::new(), false), new))
+            Ok(((false, Vec::new(), false, false), new))
         }
-        (None, None) => Ok(((false, Vec::new(), false), (false, Vec::new(), false))),
+        (None, None) => Ok(((false, Vec::new(), false, false), (false, Vec::new(), false, false))),
     }
 }
 
@@ -1731,20 +1752,38 @@ pub fn revision_diff_file_content(
     });
 
     // 旧/新修订 svn cat 并发，历史 Diff 通常能接近减半等待时间
-    let (old_exists, old_bytes, old_over, new_exists, new_bytes, new_over) = match status.as_str() {
+    let (old_exists, old_bytes, old_over, old_too_many, new_exists, new_bytes, new_over, new_too_many) = match status.as_str() {
         "A" => {
             let (_old, new) = svn_cat_pair(&url, None, Some(rev_num))?;
-            (false, Vec::new(), false, new.0, new.1, new.2)
+            (false, Vec::new(), false, false, new.0, new.1, new.2, new.3)
         }
         "D" | "!" => {
             let (old, _new) = svn_cat_pair(&url, prev_rev.as_deref(), None)?;
-            (old.0, old.1, old.2, false, Vec::new(), false)
+            (old.0, old.1, old.2, old.3, false, Vec::new(), false, false)
         }
         _ => {
             let (old, new) = svn_cat_pair(&url, prev_rev.as_deref(), Some(rev_num))?;
-            (old.0, old.1, old.2, new.0, new.1, new.2)
+            (old.0, old.1, old.2, old.3, new.0, new.1, new.2, new.3)
         }
     };
+
+    // 行数超限 → 直接拒绝（不继续做行级 diff）
+    if old_too_many || new_too_many {
+        return Ok(DiffFileContent {
+            path,
+            relative_path: relative,
+            name,
+            status,
+            status_label,
+            binary: true,
+            old_text: String::new(),
+            new_text: String::new(),
+            old_exists,
+            new_exists,
+            language,
+            message: Some(format!("文件超过 {MAX_DIFF_LINES} 行，不展示文本 Diff")),
+        });
+    }
 
     let oversized = old_over || new_over;
     let binary = oversized
@@ -2167,24 +2206,27 @@ fn bytes_look_binary(bytes: &[u8]) -> bool {
     !looks_like_text(bytes)
 }
 
-fn read_working_bytes(path: &Path) -> Result<(bool, Vec<u8>, bool), String> {
-    // returns (exists, bytes, oversized)
+fn read_working_bytes(path: &Path) -> Result<(bool, Vec<u8>, bool, bool), String> {
+    // returns (exists, bytes, oversized_bytes, too_many_lines)
     if !path.exists() {
-        return Ok((false, Vec::new(), false));
+        return Ok((false, Vec::new(), false, false));
     }
     if path.is_dir() {
-        return Ok((true, Vec::new(), false));
+        return Ok((true, Vec::new(), false, false));
     }
     let meta = fs::metadata(path).map_err(|e| format!("读取文件失败: {e}"))?;
     if meta.len() > 2 * 1024 * 1024 {
-        return Ok((true, Vec::new(), true));
+        return Ok((true, Vec::new(), true, false));
     }
     let bytes = fs::read(path).map_err(|e| format!("读取文件内容失败: {e}"))?;
-    Ok((true, bytes, false))
+    if count_lines(&bytes) > MAX_DIFF_LINES {
+        return Ok((true, Vec::new(), false, true));
+    }
+    Ok((true, bytes, false, false))
 }
 
-fn svn_cat_revision(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), String> {
-    // returns (exists, bytes, oversized)
+fn svn_cat_revision(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool, bool), String> {
+    // returns (exists, bytes, oversized_bytes, too_many_lines)
     let svn = svn_binary();
     let path_str = path.to_string_lossy().to_string();
     let mut cmd = Command::new(svn);
@@ -2195,12 +2237,15 @@ fn svn_cat_revision(path: &Path, rev: &str) -> Result<(bool, Vec<u8>, bool), Str
         .output()
         .map_err(|e| format!("执行 svn cat 失败: {e}"))?;
     if !output.status.success() {
-        return Ok((false, Vec::new(), false));
+        return Ok((false, Vec::new(), false, false));
     }
     if output.stdout.len() > 2 * 1024 * 1024 {
-        return Ok((true, Vec::new(), true));
+        return Ok((true, Vec::new(), true, false));
     }
-    Ok((true, output.stdout, false))
+    if count_lines(&output.stdout) > MAX_DIFF_LINES {
+        return Ok((true, Vec::new(), false, true));
+    }
+    Ok((true, output.stdout, false, false))
 }
 
 fn relative_to_root(root: &Path, full: &Path) -> String {
@@ -2300,12 +2345,12 @@ fn detect_binary(path: &Path, status_code: &str) -> Result<bool, String> {
     if path.is_dir() {
         return Ok(false);
     }
-    let (new_exists, new_bytes, new_over) = read_working_bytes(path)?;
+    let (new_exists, new_bytes, new_over, _new_too_many) = read_working_bytes(path)?;
     let need_base = !(status_code == "?" || status_code == "A");
-    let (old_exists, old_bytes, old_over) = if need_base {
+    let (old_exists, old_bytes, old_over, _old_too_many) = if need_base {
         svn_cat_revision(path, "BASE")?
     } else {
-        (false, Vec::new(), false)
+        (false, Vec::new(), false, false)
     };
     if new_over || old_over {
         return Ok(true);
@@ -2445,12 +2490,49 @@ pub fn diff_file_content(path: String) -> Result<DiffFileContent, String> {
         });
     }
 
-    let (new_exists, new_bytes, new_over) = read_working_bytes(&target)?;
-    let (old_exists, old_bytes, old_over) = if code == "?" || code == "A" {
-        (false, Vec::new(), false)
+    let (new_exists, new_bytes, new_over, new_too_many) = read_working_bytes(&target)?;
+
+    // 工作副本文件行数超限 → 直接拒绝，不请求 svn cat 旧版本
+    if new_too_many {
+        return Ok(DiffFileContent {
+            path,
+            relative_path: relative,
+            name,
+            status: code,
+            status_label,
+            binary: true,
+            old_text: String::new(),
+            new_text: String::new(),
+            old_exists: false,
+            new_exists,
+            language,
+            message: Some(format!("文件超过 {MAX_DIFF_LINES} 行，不展示文本 Diff")),
+        });
+    }
+
+    let (old_exists, old_bytes, old_over, old_too_many) = if code == "?" || code == "A" {
+        (false, Vec::new(), false, false)
     } else {
         svn_cat_revision(&target, "BASE")?
     };
+
+    // 旧版本行数超限 → 拒绝
+    if old_too_many {
+        return Ok(DiffFileContent {
+            path,
+            relative_path: relative,
+            name,
+            status: code,
+            status_label,
+            binary: true,
+            old_text: String::new(),
+            new_text: String::new(),
+            old_exists,
+            new_exists,
+            language,
+            message: Some(format!("文件超过 {MAX_DIFF_LINES} 行，不展示文本 Diff")),
+        });
+    }
 
     let oversized = new_over || old_over;
     let binary = oversized

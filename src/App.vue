@@ -1623,10 +1623,16 @@ async function onSwitch(payload: { url: string }) {
   }
 }
 
-async function onChangesAction(payload: { action: "diff" | "revert" | "commit" | "reveal"; path: string }) {
+async function onChangesAction(payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal"; path: string }) {
   if (payload.action === "commit") {
     modalType.value = null;
     await openCommitDialog(payload.path || changesRoot.value || activeWorkspace.value?.path || "");
+    return;
+  }
+  if (payload.action === "diffAll") {
+    const root = payload.path || changesRoot.value || activeWorkspace.value?.path || "";
+    if (!root) return;
+    await openDiffViewer(root, `DIFF · ${root.split("/").pop() || root}`);
     return;
   }
   if (!payload.path) return;
@@ -1652,6 +1658,18 @@ async function onChangesAction(payload: { action: "diff" | "revert" | "commit" |
       await refreshChangesDialog();
       await refreshCurrent();
     }
+  }
+}
+
+async function onCommitAction(payload: { action: "diff" | "diffAll"; path: string }) {
+  if (payload.action === "diffAll") {
+    const root = payload.path || commitTarget.value || activeWorkspace.value?.path || "";
+    if (!root) return;
+    await openDiffViewer(root, `DIFF · ${root.split("/").pop() || root}`);
+    return;
+  }
+  if (payload.action === "diff" && payload.path) {
+    await openDiffViewer(payload.path, `DIFF · ${payload.path.split("/").pop() || payload.path}`);
   }
 }
 
@@ -1867,6 +1885,7 @@ onUnmounted(() => {
       @close-progress="closeProgress"
       @checkout="onCheckout"
       @commit="onCommit"
+      @commit-action="onCommitAction"
       @rename="onRename"
       @switch="onSwitch"
       @changes-action="onChangesAction"

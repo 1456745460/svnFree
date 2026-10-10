@@ -2091,6 +2091,32 @@ body.is-resizing-history-split {
   grid-template-columns: 28px minmax(0, 1fr) auto !important;
 }
 
+/* 提交对话框：行内有 checkbox label 区 + 操作按钮区 */
+.commit-file-list .commit-row-with-actions {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  cursor: default;
+}
+
+.commit-file-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.commit-file-check input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.commit-file-check .status-badge {
+  flex: 0 0 auto;
+}
+
 .changes-actions {
   display: flex;
   align-items: center;
