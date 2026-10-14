@@ -1337,6 +1337,25 @@ body.col-resizing * {
   overflow: auto;
 }
 
+.commit-list-field {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.commit-list-field .commit-list-head {
+  flex: 0 0 auto;
+}
+
+.commit-list-field .commit-file-list,
+.commit-list-field .commit-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
 .commit-list-head {
   display: flex;
   align-items: center;
@@ -1676,7 +1695,7 @@ body.is-resizing-history-split {
 }
 
 .history-path-list .history-path-row {
-  grid-template-columns: 42px minmax(120px, 0.4fr) minmax(0, 1.6fr) auto;
+  grid-template-columns: 42px minmax(180px, 1fr) minmax(0, 1fr) auto;
   cursor: pointer;
   text-align: left;
   border: 0;
@@ -1766,6 +1785,29 @@ body.is-resizing-history-split {
   width: min(1100px, calc(100vw - 48px));
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 40px);
+}
+
+/* 提交/变更弹窗固定视口占比，伸缩文件夹时窗口尺寸不变 */
+.modal.commit-modal:not(.history-modal) {
+  width: 80vw;
+  height: 80vh;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal.commit-modal:not(.history-modal) .modal-header,
+.modal.commit-modal:not(.history-modal) .modal-footer {
+  flex: 0 0 auto;
+}
+
+.modal.commit-modal:not(.history-modal) .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
 }
 
 .modal-header {
@@ -2126,6 +2168,96 @@ body.is-resizing-history-split {
 .danger-text {
   color: var(--danger) !important;
 }
+
+/* ── 树形文件列表：文件夹分组 ─────────────────────────── */
+
+/* 覆盖 .commit-file-row 的 display:grid !important，否则 v-show/display:none 无效 */
+.commit-file-list .commit-file-row.tree-row-hidden {
+  display: none !important;
+}
+
+/* 展开合拢箭头图标 */
+.tree-toggle {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted, #888);
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.tree-toggle:hover {
+  color: var(--text);
+}
+
+/* 文件行第一列占位（与文件夹的 toggle 列对齐） */
+.tree-toggle-spacer {
+  flex: 0 0 auto;
+  width: 16px;
+  display: inline-block;
+}
+
+/* 统一的树形 grid 列：toggle/checkbox/status/name/actions */
+.commit-file-row.tree-folder,
+.commit-file-row.commit-tree-file,
+.commit-file-row.changes-tree-file {
+  grid-template-columns: 16px 18px 28px minmax(0, 1fr) auto !important;
+  align-items: center;
+  column-gap: 6px;
+  cursor: default;
+}
+
+.commit-file-row.tree-folder {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--bg-soft) 60%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.commit-file-row.tree-folder .tree-folder-icon {
+  font-size: 13px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.commit-file-row.tree-folder .tree-folder-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+/* 变更弹窗中的文件夹行：去掉 checkbox 列 */
+.commit-file-row.tree-folder.changes-tree-folder {
+  grid-template-columns: 16px 28px minmax(0, 1fr) auto !important;
+}
+
+/* 变更弹窗中的文件行：去掉 checkbox 列 */
+.commit-file-row.changes-tree-file {
+  grid-template-columns: 16px 28px minmax(0, 1fr) auto !important;
+}
+
+/* 文件行缩进 */
+.commit-file-row.tree-file {
+  position: relative;
+}
+
+.commit-file-row.tree-file::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--border) 50%, transparent);
+}
+
 
 .file-toolbar .toolbar {
   flex-wrap: wrap;
