@@ -16,6 +16,7 @@
   --success: #059669;
   --warning: #d97706;
   --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --tree-line: #8b9cb3;
   --radius: 10px;
   --sidebar-width: 250px;
   --preview-width: 340px;
@@ -42,6 +43,7 @@
     --success: #34d399;
     --warning: #fbbf24;
     --shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    --tree-line: #7f93ab;
   }
 }
 
@@ -2169,93 +2171,150 @@ body.is-resizing-history-split {
   color: var(--danger) !important;
 }
 
-/* ── 树形文件列表：文件夹分组 ─────────────────────────── */
+/* ── 树形文件列表 ─────────────────────────────────────── */
 
-/* 覆盖 .commit-file-row 的 display:grid !important，否则 v-show/display:none 无效 */
-.commit-file-list .commit-file-row.tree-row-hidden {
-  display: none !important;
-}
-
-/* 展开合拢箭头图标 */
-.tree-toggle {
-  flex: 0 0 auto;
-  width: 16px;
-  text-align: center;
-  font-size: 10px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--text-muted, #888);
-  user-select: none;
-  transition: color 0.15s;
-}
-
-.tree-toggle:hover {
-  color: var(--text);
-}
-
-/* 文件行第一列占位（与文件夹的 toggle 列对齐） */
-.tree-toggle-spacer {
-  flex: 0 0 auto;
-  width: 16px;
-  display: inline-block;
-}
-
-/* 统一的树形 grid 列：toggle/checkbox/status/name/actions */
-.commit-file-row.tree-folder,
-.commit-file-row.commit-tree-file,
-.commit-file-row.changes-tree-file {
-  grid-template-columns: 16px 18px 28px minmax(0, 1fr) auto !important;
-  align-items: center;
+.commit-file-list .commit-file-row.tree-node {
+  grid-template-columns: auto 16px 18px 28px 16px minmax(0, 1fr) auto !important;
   column-gap: 6px;
+  align-items: center;
+  padding: 0 10px 0 4px;
+  min-height: 32px;
   cursor: default;
-}
-
-.commit-file-row.tree-folder {
-  font-weight: 600;
-  background: color-mix(in srgb, var(--bg-soft) 60%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
-  cursor: pointer;
   user-select: none;
 }
 
-.commit-file-row.tree-folder .tree-folder-icon {
-  font-size: 13px;
-  line-height: 1;
-  flex: 0 0 auto;
+.commit-file-list .commit-file-row.tree-node.changes-tree-node {
+  grid-template-columns: auto 16px 28px 16px minmax(0, 1fr) auto !important;
 }
 
-.commit-file-row.tree-folder .tree-folder-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-  color: var(--text);
+.commit-file-list .commit-file-row.tree-node.is-branch {
+  cursor: pointer;
 }
 
-/* 变更弹窗中的文件夹行：去掉 checkbox 列 */
-.commit-file-row.tree-folder.changes-tree-folder {
-  grid-template-columns: 16px 28px minmax(0, 1fr) auto !important;
+.commit-file-list .commit-file-row.tree-node.tree-folder {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--bg-soft) 42%, transparent);
 }
 
-/* 变更弹窗中的文件行：去掉 checkbox 列 */
-.commit-file-row.changes-tree-file {
-  grid-template-columns: 16px 28px minmax(0, 1fr) auto !important;
+.tree-guides {
+  display: flex;
+  align-self: stretch;
+  min-height: 32px;
 }
 
-/* 文件行缩进 */
-.commit-file-row.tree-file {
+.tree-guide {
   position: relative;
+  width: 16px;
+  flex: 0 0 16px;
+  align-self: stretch;
 }
 
-.commit-file-row.tree-file::before {
+.tree-guide.none {
+  width: 0;
+  flex-basis: 0;
+}
+
+.tree-guide.pass::before,
+.tree-guide.elbow::before,
+.tree-guide.elbow-first::before,
+.tree-guide.elbow-last::before {
   content: "";
   position: absolute;
-  left: 18px;
-  top: 0;
-  bottom: 0;
+  left: 7px;
   width: 1px;
-  background: color-mix(in srgb, var(--border) 50%, transparent);
+  background: var(--tree-line);
+}
+
+.tree-guide.pass::before,
+.tree-guide.elbow::before {
+  top: -1px;
+  bottom: -1px;
+}
+
+.tree-guide.elbow-first::before {
+  top: 50%;
+  bottom: -1px;
+}
+
+.tree-guide.elbow-last::before {
+  top: -1px;
+  height: calc(50% + 1px);
+}
+
+.tree-guide.elbow::after,
+.tree-guide.elbow-first::after,
+.tree-guide.elbow-last::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  width: 15px;
+  height: 1px;
+  background: var(--tree-line);
+}
+
+.tree-toggle {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.tree-toggle.is-empty {
+  pointer-events: none;
+}
+
+.tree-chevron {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transform-origin: 50% 45%;
+  transition: transform 0.12s ease;
+}
+
+.tree-toggle.collapsed .tree-chevron {
+  transform: rotate(-90deg);
+}
+
+.tree-badge-slot {
+  visibility: hidden;
+  min-width: 18px;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.tree-node-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.tree-label {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tree-count {
+  flex: 0 0 auto;
+  font-weight: 400;
+}
+
+.tree-path-sep {
+  color: var(--text-muted);
+  font-weight: 400;
+  padding: 0 1px;
+}
+
+.tree-actions-spacer {
+  width: 0;
 }
 
 

@@ -2,8 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ProgressState, SvnLogEntry, SvnLogPath, SvnStatusItem } from "../types";
-import { canRevertSvnStatus, getSvnStatusMeta } from "../utils/materialIcon";
-import { isUnsupportedDiffPath } from "../utils/diffSupport";
+import { getSvnStatusMeta } from "../utils/materialIcon";
+import { branchKeys, buildChangeTree } from "../utils/changeTree";
+import ChangeFileTree from "./ChangeFileTree.vue";
 
 const props = defineProps<{
   type: "checkout" | "commit" | "output" | "rename" | "switch" | "changes" | "history" | null;
@@ -158,18 +159,6 @@ async function pickCheckoutDirectory() {
   path.value = selected;
 }
 
-function statusMeta(code: string) {
-  return getSvnStatusMeta(code);
-}
-
-/** 判断某项是否可以做文本 diff（非目录、非二进制、扩展名支持） */
-function canDiffItem(item: { path: string; isDir?: boolean; binary?: boolean; status?: string }) {
-  // 新增（A）状态没有旧文本，diff 意义不大但仍可展示为新增文件
-  if (item.status === "D") return true;
-  if (item.status === "A") return true;
-  return !isUnsupportedDiffPath(item.path, { isDir: item.isDir, binary: item.binary });
-}
-
 function resetChecked(items: SvnStatusItem[] = []) {
   const next: Record<string, boolean> = {};
   for (const item of items) {
@@ -195,161 +184,35 @@ function toggleAll(v: boolean) {
   checked.value = next;
 }
 
-function toggleOne(pathValue: string, v: boolean) {
-  checked.value = { ...checked.value, [pathValue]: v };
-}
-
 // ── 树形分组 ──────────────────────────────────────────────
 
-/** 获取文件所属的文件夹路径（相对于 commitRoot/changesRoot），末尾带 "/" */
-function dirOf(item: SvnStatusItem): string {
-  const rel = (item.relativePath || item.name || "").replace(/\\/g, "/");
-  const slash = rel.lastIndexOf("/");
-  return slash < 0 ? "" : rel.substring(0, slash + 1);
-}
+const commitTree = computed(() => buildChangeTree(props.commitItems || [], props.commitRoot));
+const changesTree = computed(() => buildChangeTree(props.changesItems || [], props.changesRoot));
 
-/** 提交弹窗：按文件夹分组的树形结构 */
-const commitTree = computed(() => {
-  const items = props.commitItems || [];
-  const groups: { dir: string; items: SvnStatusItem[] }[] = [];
-  const map = new Map<string, SvnStatusItem[]>();
-  for (const item of items) {
-    const dir = dirOf(item);
-    if (!map.has(dir)) {
-      map.set(dir, []);
-      groups.push({ dir, items: [] });
-    }
-    map.get(dir)!.push(item);
-  }
-  // 填充 items 引用
-  for (const g of groups) g.items = map.get(g.dir)!;
-  // 根文件夹（""）排在最前，其余按字母排序
-  groups.sort((a, b) => {
-    if (!a.dir) return -1;
-    if (!b.dir) return 1;
-    return a.dir < b.dir ? -1 : 1;
-  });
-  return groups;
-});
-
-/** 变更弹窗：按文件夹分组的树形结构 */
-const changesTree = computed(() => {
-  const items = props.changesItems || [];
-  const groups: { dir: string; items: SvnStatusItem[] }[] = [];
-  const map = new Map<string, SvnStatusItem[]>();
-  for (const item of items) {
-    const dir = dirOf(item);
-    if (!map.has(dir)) {
-      map.set(dir, []);
-      groups.push({ dir, items: [] });
-    }
-    map.get(dir)!.push(item);
-  }
-  for (const g of groups) g.items = map.get(g.dir)!;
-  groups.sort((a, b) => {
-    if (!a.dir) return -1;
-    if (!b.dir) return 1;
-    return a.dir < b.dir ? -1 : 1;
-  });
-  return groups;
-});
-
-/** 某文件夹分组下所有文件的勾选状态：all | none | some */
-function groupCheckState(groupItems: SvnStatusItem[]): "all" | "none" | "some" {
-  let checkedCount = 0;
-  for (const item of groupItems) {
-    if (checked.value[item.path]) checkedCount++;
-  }
-  if (checkedCount === 0) return "none";
-  if (checkedCount === groupItems.length) return "all";
-  return "some";
-}
-
-/** 勾选/取消勾选某文件夹分组下的所有文件 */
+/** 勾选/取消勾选某节点下的全部变更 */
 function toggleGroup(groupItems: SvnStatusItem[], v: boolean) {
   const next = { ...checked.value };
   for (const item of groupItems) next[item.path] = v;
   checked.value = next;
 }
 
-/** 缩进层级：根据目录深度计算 padding-left */
-function groupIndent(dir: string): number {
-  if (!dir) return 0;
-  return dir.split("/").filter(Boolean).length;
-}
-
 // ── 文件夹展开/合拢 ──────────────────────────────────────────
 
-/** 合拢的文件夹路径集合（默认全部展开，仅记录被合拢的） */
+/** 合拢的节点 key（默认全部展开，仅记录被合拢的） */
 const collapsed = ref<Record<string, boolean>>({});
 
-/** 切换某文件夹的展开/合拢状态 */
-function toggleCollapse(dir: string) {
-  collapsed.value = { ...collapsed.value, [dir]: !collapsed.value[dir] };
+function toggleCollapse(key: string) {
+  collapsed.value = { ...collapsed.value, [key]: !collapsed.value[key] };
 }
 
-/** 某文件夹是否已合拢 */
-function isCollapsed(dir: string): boolean {
-  return !!collapsed.value[dir];
-}
-
-/** 某祖先路径是否已合拢（不含自身） */
-function hasCollapsedAncestor(dir: string): boolean {
-  if (!dir) return false;
-  const parts = dir.split("/").filter(Boolean);
-  for (let i = 0; i < parts.length - 1; i++) {
-    const parentDir = parts.slice(0, i + 1).join("/") + "/";
-    if (collapsed.value[parentDir]) return true;
-  }
-  return false;
-}
-
-/** 文件夹标题行是否显示（祖先未合拢） */
-function isGroupVisible(dir: string): boolean {
-  return !hasCollapsedAncestor(dir);
-}
-
-/** 判断某文件是否应该显示（其所属文件夹未合拢） */
-function isFileVisible(item: SvnStatusItem): boolean {
-  const dir = dirOf(item);
-  if (!dir) return true; // 根目录文件始终显示
-  if (collapsed.value[dir] || hasCollapsedAncestor(dir)) return false;
-  return true;
-}
-
-/** 提交弹窗文件可见性 Map（响应式） */
-const commitFileVisible = computed<Record<string, boolean>>(() => {
-  const map: Record<string, boolean> = {};
-  for (const grp of commitTree.value) {
-    for (const item of grp.items) {
-      map[item.path] = isFileVisible(item);
-    }
-  }
-  return map;
-});
-
-/** 变更弹窗文件可见性 Map（响应式） */
-const changesFileVisible = computed<Record<string, boolean>>(() => {
-  const map: Record<string, boolean> = {};
-  for (const grp of changesTree.value) {
-    for (const item of grp.items) {
-      map[item.path] = isFileVisible(item);
-    }
-  }
-  return map;
-});
-
-/** 全部展开 */
 function expandAll() {
   collapsed.value = {};
 }
 
-/** 全部合拢 */
-function collapseAll() {
+function collapseAll(which: "commit" | "changes" = "commit") {
   const next: Record<string, boolean> = {};
-  for (const grp of commitTree.value) {
-    if (grp.dir) next[grp.dir] = true;
-  }
+  const nodes = which === "changes" ? changesTree.value : commitTree.value;
+  for (const key of branchKeys(nodes)) next[key] = true;
   collapsed.value = next;
 }
 
@@ -364,6 +227,9 @@ watch(
     if (t === "commit") {
       message.value = "";
       resetChecked(props.commitItems || []);
+      collapsed.value = {};
+    }
+    if (t === "changes") {
       collapsed.value = {};
     }
     if (t === "rename") {
@@ -487,7 +353,7 @@ function submitSwitch() {
             <label>变更文件</label>
             <div class="commit-list-actions">
               <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || commitLoading" @click="expandAll">展开</button>
-              <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || commitLoading" @click="collapseAll">合拢</button>
+              <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || commitLoading" @click="collapseAll('commit')">合拢</button>
               <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || commitLoading" @click="toggleAll(true)">全选</button>
               <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || commitLoading" @click="toggleAll(false)">全不选</button>
               <span class="tiny muted">已选 {{ selectedCount }} / {{ (commitItems || []).length }}</span>
@@ -501,67 +367,17 @@ function submitSwitch() {
               <input type="checkbox" :checked="allChecked" :disabled="busy" @change="toggleAll(($event.target as HTMLInputElement).checked)" />
               <span>全部变更</span>
             </label>
-            <template v-for="grp in commitTree" :key="grp.dir || '__root__'">
-              <!-- 文件夹分组标题行（有目录时才显示） -->
-              <div
-                v-if="grp.dir"
-                class="commit-file-row tree-folder"
-                :class="{ 'tree-row-hidden': !isGroupVisible(grp.dir) }"
-                :style="{ paddingLeft: 10 + groupIndent(grp.dir) * 16 + 'px' }"
-                @click="toggleCollapse(grp.dir)"
-              >
-                <span
-                  class="tree-toggle"
-                  :title="isCollapsed(grp.dir) ? '展开' : '合拢'"
-                >{{ isCollapsed(grp.dir) ? '▶' : '▼' }}</span>
-                <input
-                  type="checkbox"
-                  :checked="groupCheckState(grp.items) === 'all'"
-                  :indeterminate.prop="groupCheckState(grp.items) === 'some'"
-                  :disabled="busy"
-                  @click.stop
-                  @change="toggleGroup(grp.items, ($event.target as HTMLInputElement).checked)"
-                />
-                <span class="tree-folder-icon">{{ isCollapsed(grp.dir) ? '📂' : '📁' }}</span>
-                <span class="tree-folder-name">{{ grp.dir }}</span>
-                <span class="tiny muted">{{ grp.items.length }} 个</span>
-              </div>
-              <!-- 该文件夹下的文件 -->
-              <div
-                v-for="item in grp.items"
-                :key="item.path"
-                class="commit-file-row tree-file commit-tree-file"
-                :class="{ 'tree-row-hidden': commitFileVisible[item.path] === false }"
-                :style="{ paddingLeft: 10 + (grp.dir ? (groupIndent(grp.dir) + 1) : 0) * 16 + 'px' }"
-                :title="item.path"
-              >
-                <span class="tree-toggle-spacer"></span>
-                <input
-                  type="checkbox"
-                  class="tree-file-checkbox"
-                  :checked="!!checked[item.path]"
-                  :disabled="busy"
-                  @change="toggleOne(item.path, ($event.target as HTMLInputElement).checked)"
-                />
-                <span
-                  v-if="statusMeta(item.status)"
-                  class="status-badge"
-                  :class="statusMeta(item.status)!.className"
-                  :title="statusMeta(item.status)!.label"
-                >{{ statusMeta(item.status)!.code }}</span>
-                <span v-else class="status-badge other">?</span>
-                <span class="commit-file-name">{{ item.name }}</span>
-                <div class="changes-actions">
-                  <button
-                    v-if="canDiffItem(item)"
-                    type="button"
-                    class="btn btn-ghost tiny-btn"
-                    :disabled="busy"
-                    @click.stop="emit('commitAction', { action: 'diff', path: item.path })"
-                  >DIFF</button>
-                </div>
-              </div>
-            </template>
+            <ChangeFileTree
+              :items="commitItems || []"
+              :root="commitRoot"
+              mode="commit"
+              :busy="busy"
+              :checked="checked"
+              :collapsed="collapsed"
+              @toggle-collapse="toggleCollapse"
+              @toggle-check="toggleGroup"
+              @diff="(path) => emit('commitAction', { action: 'diff', path })"
+            />
           </div>
         </div>
 
@@ -680,6 +496,8 @@ function submitSwitch() {
           <div class="commit-list-head">
             <label>变更列表</label>
             <div class="commit-list-actions">
+              <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || changesLoading" @click="expandAll">展开</button>
+              <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || changesLoading" @click="collapseAll('changes')">合拢</button>
               <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy || changesLoading" @click="emit('refreshChanges')">刷新</button>
               <span class="tiny muted">{{ (changesItems || []).length }} 项</span>
             </div>
@@ -687,54 +505,17 @@ function submitSwitch() {
           <div v-if="changesLoading" class="commit-empty">正在读取变更...</div>
           <div v-else-if="!(changesItems || []).length" class="commit-empty">当前没有本地变更。</div>
           <div v-else class="commit-file-list">
-            <template v-for="grp in changesTree" :key="grp.dir || '__root__'">
-              <!-- 文件夹分组标题行 -->
-              <div
-                v-if="grp.dir"
-                class="commit-file-row tree-folder changes-tree-folder"
-                :class="{ 'tree-row-hidden': !isGroupVisible(grp.dir) }"
-                :style="{ paddingLeft: 10 + groupIndent(grp.dir) * 16 + 'px' }"
-                @click="toggleCollapse(grp.dir)"
-              >
-                <span
-                  class="tree-toggle"
-                  :title="isCollapsed(grp.dir) ? '展开' : '合拢'"
-                >{{ isCollapsed(grp.dir) ? '▶' : '▼' }}</span>
-                <span class="tree-folder-icon">{{ isCollapsed(grp.dir) ? '📂' : '📁' }}</span>
-                <span class="tree-folder-name">{{ grp.dir }}</span>
-                <span class="tiny muted">{{ grp.items.length }} 个</span>
-              </div>
-              <!-- 该文件夹下的文件 -->
-              <div
-                v-for="item in grp.items"
-                :key="item.path"
-                class="commit-file-row tree-file changes-tree-file"
-                :class="{ 'tree-row-hidden': changesFileVisible[item.path] === false }"
-                :style="{ paddingLeft: 10 + (grp.dir ? (groupIndent(grp.dir) + 1) : 0) * 16 + 'px' }"
-                :title="item.path"
-              >
-                <span class="tree-toggle-spacer"></span>
-                <span
-                  v-if="statusMeta(item.status)"
-                  class="status-badge"
-                  :class="statusMeta(item.status)!.className"
-                  :title="statusMeta(item.status)!.label"
-                >{{ statusMeta(item.status)!.code }}</span>
-                <span v-else class="status-badge other">?</span>
-                <span class="commit-file-name">{{ item.name }}</span>
-                <div class="changes-actions">
-                  <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy" @click="emit('changesAction', { action: 'diff', path: item.path })">DIFF</button>
-                  <button type="button" class="btn btn-ghost tiny-btn" :disabled="busy" @click="emit('changesAction', { action: 'reveal', path: item.path })">定位</button>
-                  <button
-                    v-if="canRevertSvnStatus(item.status)"
-                    type="button"
-                    class="btn btn-ghost tiny-btn danger-text"
-                    :disabled="busy"
-                    @click="emit('changesAction', { action: 'revert', path: item.path })"
-                  >还原</button>
-                </div>
-              </div>
-            </template>
+            <ChangeFileTree
+              :items="changesItems || []"
+              :root="changesRoot"
+              mode="changes"
+              :busy="busy"
+              :collapsed="collapsed"
+              @toggle-collapse="toggleCollapse"
+              @diff="(path) => emit('changesAction', { action: 'diff', path })"
+              @reveal="(path) => emit('changesAction', { action: 'reveal', path })"
+              @revert="(path) => emit('changesAction', { action: 'revert', path })"
+            />
           </div>
         </div>
         <div class="tiny muted">可在此快速浏览本地修改；需要提交时请使用「提交」并勾选文件。</div>
