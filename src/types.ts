@@ -96,6 +96,7 @@ export type ContextAction =
 export type WorkspaceAction =
   | "update"
   | "commit"
+  | "conflicts"
   | "diff"
   | "log"
   | "info"
@@ -184,3 +185,47 @@ export interface DiffViewerState {
   rootPath: string;
   title: string;
 }
+
+export interface ConflictItem {
+  path: string;
+  name: string;
+  relativePath: string;
+  isDir: boolean;
+  text: boolean;
+  property: boolean;
+  tree: boolean;
+  kindLabel: string;
+}
+
+export interface ConflictSide {
+  available: boolean;
+  binary: boolean;
+  text: string;
+  source: string;
+  message?: string | null;
+}
+
+export interface ConflictDetail {
+  path: string;
+  name: string;
+  relativePath: string;
+  isDir: boolean;
+  text: boolean;
+  property: boolean;
+  tree: boolean;
+  kindLabel: string;
+  summary: string;
+  mine: ConflictSide;
+  theirs: ConflictSide;
+  base: ConflictSide;
+  working: ConflictSide;
+  propertyText?: string | null;
+}
+
+export type ConflictAccept =
+  | "mine-full"
+  | "theirs-full"
+  | "working"
+  | "base"
+  | "mine-conflict"
+  | "theirs-conflict";

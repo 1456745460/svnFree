@@ -32,10 +32,10 @@ const emit = defineEmits<{
   closeProgress: [];
   checkout: [payload: { url: string; path: string; name?: string }];
   commit: [payload: { message: string; paths: string[] }];
-  commitAction: [payload: { action: "diff" | "diffAll"; path: string }];
+  commitAction: [payload: { action: "diff" | "diffAll" | "resolve"; path: string }];
   rename: [newName: string];
   switch: [payload: { url: string }];
-  changesAction: [payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal"; path: string }];
+  changesAction: [payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal" | "resolve"; path: string }];
   refreshChanges: [];
   historySelect: [entry: SvnLogEntry];
   historyViewPath: [payload: { entry: SvnLogEntry; path: SvnLogPath }];
@@ -173,6 +173,8 @@ const selectedPaths = computed(() =>
 );
 
 const selectedCount = computed(() => selectedPaths.value.length);
+const commitConflictCount = computed(() => (props.commitItems || []).filter((item) => item.status === "C").length);
+const changesConflictCount = computed(() => (props.changesItems || []).filter((item) => item.status === "C").length);
 const allChecked = computed(() => {
   const items = props.commitItems || [];
   return items.length > 0 && items.every((i) => checked.value[i.path]);
@@ -347,6 +349,10 @@ function submitSwitch() {
           <label>目标</label>
           <div class="tiny mono muted" :title="commitRoot">{{ commitRoot || "—" }}</div>
         </div>
+        <div v-if="commitConflictCount" class="conflict-banner">
+          <span>有 {{ commitConflictCount }} 个冲突还没解决，提交前需要先处理。</span>
+          <button type="button" class="btn tiny-btn" :disabled="busy" @click="emit('commitAction', { action: 'resolve', path: commitRoot || '' })">解决冲突</button>
+        </div>
 
         <div class="field commit-list-field">
           <div class="commit-list-head">
@@ -377,6 +383,7 @@ function submitSwitch() {
               @toggle-collapse="toggleCollapse"
               @toggle-check="toggleGroup"
               @diff="(path) => emit('commitAction', { action: 'diff', path })"
+              @resolve="(path) => emit('commitAction', { action: 'resolve', path })"
             />
           </div>
         </div>
@@ -515,6 +522,7 @@ function submitSwitch() {
               @diff="(path) => emit('changesAction', { action: 'diff', path })"
               @reveal="(path) => emit('changesAction', { action: 'reveal', path })"
               @revert="(path) => emit('changesAction', { action: 'revert', path })"
+              @resolve="(path) => emit('changesAction', { action: 'resolve', path })"
             />
           </div>
         </div>
@@ -523,6 +531,7 @@ function submitSwitch() {
       <div class="modal-footer">
         <button class="btn" :disabled="busy" @click="emit('close')">关闭</button>
         <button class="btn" :disabled="busy || !(changesItems || []).length" @click="emit('changesAction', { action: 'diffAll', path: changesRoot || '' })">查看所有 diff</button>
+        <button v-if="changesConflictCount" class="btn" :disabled="busy" @click="emit('changesAction', { action: 'resolve', path: changesRoot || '' })">解决冲突 ({{ changesConflictCount }})</button>
         <button class="btn btn-primary" :disabled="busy || !(changesItems || []).length" @click="emit('changesAction', { action: 'commit', path: changesRoot || '' })">去提交...</button>
       </div>
     </div>

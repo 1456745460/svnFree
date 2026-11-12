@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CommandResult,
+  ConflictDetail,
+  ConflictItem,
   DiffFileContent,
   DiffFileInfo,
   DiffFileStat,
@@ -66,6 +68,18 @@ export function svnIgnore(path: string) {
 
 export function svnResolved(path: string) {
   return invoke<CommandResult>("svn_resolved", { path });
+}
+
+export function svnListConflicts(path: string) {
+  return invoke<ConflictItem[]>("svn_list_conflicts", { path });
+}
+
+export function svnConflictDetail(path: string) {
+  return invoke<ConflictDetail>("svn_conflict_detail", { path });
+}
+
+export function svnResolveConflict(path: string, accept: string) {
+  return invoke<CommandResult>("svn_resolve_conflict", { path, accept });
 }
 
 export function svnLock(paths: string[], message?: string) {

@@ -9,6 +9,7 @@ import PreviewPanel from "./components/PreviewPanel.vue";
 import ContextMenu from "./components/ContextMenu.vue";
 import Modals from "./components/Modals.vue";
 import DiffViewer from "./components/DiffViewer.vue";
+import ConflictResolver from "./components/ConflictResolver.vue";
 import * as api from "./api/svn";
 import type { ContextAction, ContextMenuState, DiffFileInfo, FsEntry, PreviewPayload, ProgressState, SvnLogEntry, SvnProgressEvent, SvnStatusItem, ToastMessage, ViewMode, Workspace, WorkspaceAction, SvnLogPath } from "./types";
 import { canRevertSvnStatus, getSvnStatusMeta } from "./utils/materialIcon";
@@ -164,6 +165,11 @@ const historySelectedRevision = ref<string>("");
 const historySelectedAction = ref<string>("");
 const historyWcLocal = ref("");
 const historyRepoPrefix = ref("");
+const conflictOpen = ref(false);
+const conflictRoot = ref("");
+const conflictFocus = ref("");
+const lastUpdatePath = ref("");
+const commitTargets = ref<string[]>([]);
 
 const contextMenu = ref<ContextMenuState>({
   visible: false,
@@ -267,16 +273,23 @@ async function onJobFinished(success: boolean, message: string) {
   }
 
   if (kind === "update") {
+    try {
+      await refreshCurrent();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast(msg, "error");
+      statusText.value = `错误: ${msg}`;
+    }
+    const found = await offerConflicts(lastUpdatePath.value || currentPath.value);
+    if (found) {
+      closeProgress();
+      if (!success) toast(message || "更新没有完成", "error");
+      statusText.value = `有 ${found} 个冲突待解决`;
+      return;
+    }
     if (success) {
-      try {
-        await refreshCurrent();
-        toast(message || "更新完成", "success");
-        statusText.value = "就绪";
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        toast(msg, "error");
-        statusText.value = `错误: ${msg}`;
-      }
+      toast(message || "更新完成", "success");
+      statusText.value = "就绪";
     } else {
       toast(message || "更新失败", "error");
       statusText.value = `错误: ${message || "更新失败"}`;
@@ -1099,6 +1112,7 @@ function computeCommitRoot(targets: string[]): string {
 
 
 async function runUpdateOn(path: string, title = "更新进度") {
+  lastUpdatePath.value = path;
   if (!path) {
     toast("请先选择工作副本或文件", "info");
     return;
@@ -1220,16 +1234,8 @@ async function runAction(action: ContextAction) {
   }
 
   if (action === "resolved") {
-    if (multi) {
-      toast("标记已解决仅支持单选", "info");
-      return;
-    }
-    const res = await withBusy(async () => api.svnResolved(path), "标记已解决...");
-    if (res) {
-      showOutput("已解决", [res.stdout, res.stderr].filter(Boolean).join("\n") || "resolved 完成");
-      await refreshCurrent();
-      toast(res.success ? "已标记为解决" : "操作结束（有警告）", res.success ? "success" : "info");
-    }
+    const root = multi ? computeCommitRoot(paths) : entry.path;
+    await openConflictResolver(root, entry.path);
     return;
   }
 
@@ -1480,6 +1486,11 @@ async function runWorkspaceAction(action: WorkspaceAction) {
     return;
   }
 
+  if (action === "conflicts") {
+    await openConflictResolver(path);
+    return;
+  }
+
   if (action === "info") {
     const res = await withBusy(async () => api.svnInfo(path), "获取信息...");
     if (res) showOutput(`信息 · ${ws.name}`, [res.stdout, res.stderr].filter(Boolean).join("\n") || "(无信息)");
@@ -1569,9 +1580,15 @@ async function openCommitDialog(target: string | string[]) {
   // - 多选：公共父目录 / 工作副本根
   const root = computeCommitRoot(targets);
   commitTarget.value = root;
+  commitTargets.value = targets;
   commitItems.value = [];
   commitLoading.value = true;
   modalType.value = "commit";
+  await loadCommitItems(targets, true);
+}
+
+async function loadCommitItems(targets: string[], announceEmpty = false) {
+  commitLoading.value = true;
   try {
     // 始终走 many：对每个选中目标分别取 status 后合并
     // 文件夹会递归遍历内部变更，文件只取自身；最终进入待勾选提交列表
@@ -1579,7 +1596,7 @@ async function openCommitDialog(target: string | string[]) {
     // 排除外部引用与忽略项；保留 ?/M/A/D/C/R/!/~ 等可提交项
     // 目录节点若本身有状态也保留（例如未版本目录）
     commitItems.value = items.filter((i) => i.status && i.status !== "X" && i.status !== "I");
-    if (!commitItems.value.length) {
+    if (announceEmpty && !commitItems.value.length) {
       toast("选中范围内没有可提交的变更", "info");
     }
   } catch (e) {
@@ -1591,6 +1608,50 @@ async function openCommitDialog(target: string | string[]) {
   }
 }
 
+async function refreshCommitDialog() {
+  if (!commitTargets.value.length) return;
+  await loadCommitItems(commitTargets.value);
+}
+
+async function openConflictResolver(root: string, focus = "") {
+  const path = (root || activeWorkspace.value?.path || currentPath.value || "").trim();
+  if (!path) {
+    toast("请先选择工作副本", "info");
+    return;
+  }
+  conflictRoot.value = path;
+  conflictFocus.value = focus || "";
+  conflictOpen.value = true;
+}
+
+async function offerConflicts(root: string) {
+  const path = (root || "").trim();
+  if (!path) return 0;
+  try {
+    const items = await api.svnListConflicts(path);
+    if (!items.length) return 0;
+    toast(`发现 ${items.length} 个冲突，请先解决后再提交`, "info");
+    await openConflictResolver(path, items[0]?.path || "");
+    return items.length;
+  } catch {
+    return 0;
+  }
+}
+
+async function onConflictsChanged() {
+  try {
+    await refreshCurrent();
+  } catch {
+    // 列表刷新失败不打断解决流程
+  }
+  if (modalType.value === "changes") {
+    await refreshChangesDialog();
+  }
+  if (modalType.value === "commit") {
+    await refreshCommitDialog();
+  }
+}
+
 async function onCommit(payload: { message: string; paths: string[] }) {
   const path = commitTarget.value;
   if (!path) return;
@@ -1598,17 +1659,41 @@ async function onCommit(payload: { message: string; paths: string[] }) {
     toast("请至少勾选一个变更文件", "info");
     return;
   }
+  const conflicted = payload.paths.filter((itemPath) =>
+    commitItems.value.some((item) => item.path === itemPath && item.status === "C"),
+  );
+  if (conflicted.length) {
+    toast(`有 ${conflicted.length} 个冲突还没解决，不能提交`, "info");
+    await openConflictResolver(path, conflicted[0]);
+    return;
+  }
   const res = await withBusy(
     async () => api.svnCommit(path, payload.message, payload.paths),
     `提交 ${payload.paths.length} 项...`,
   );
-  if (res) {
+  if (!res) return;
+  const output = [res.stdout, res.stderr].filter(Boolean).join("\n");
+  const blockedByConflict = !res.success && /conflict|冲突/i.test(output);
+  if (res.success) {
     modalType.value = null;
     commitItems.value = [];
-    showOutput("提交结果", [res.stdout, res.stderr].filter(Boolean).join("\n"));
+    showOutput("提交结果", output);
     await refreshCurrent();
-    toast(res.success ? "提交成功" : "提交结束", res.success ? "success" : "info");
+    toast("提交成功", "success");
+    return;
   }
+  if (blockedByConflict) {
+    await refreshCurrent();
+    await refreshCommitDialog();
+    toast("提交被冲突拦住了，请先解决冲突", "info");
+    await openConflictResolver(path, payload.paths[0] || "");
+    return;
+  }
+  modalType.value = null;
+  commitItems.value = [];
+  showOutput("提交结果", output);
+  await refreshCurrent();
+  toast("提交结束", "info");
 }
 
 async function onSwitch(payload: { url: string }) {
@@ -1623,7 +1708,11 @@ async function onSwitch(payload: { url: string }) {
   }
 }
 
-async function onChangesAction(payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal"; path: string }) {
+async function onChangesAction(payload: { action: "diff" | "diffAll" | "revert" | "commit" | "reveal" | "resolve"; path: string }) {
+  if (payload.action === "resolve") {
+    await openConflictResolver(payload.path || changesRoot.value || activeWorkspace.value?.path || "", payload.path || "");
+    return;
+  }
   if (payload.action === "commit") {
     modalType.value = null;
     await openCommitDialog(payload.path || changesRoot.value || activeWorkspace.value?.path || "");
@@ -1661,7 +1750,11 @@ async function onChangesAction(payload: { action: "diff" | "diffAll" | "revert" 
   }
 }
 
-async function onCommitAction(payload: { action: "diff" | "diffAll"; path: string }) {
+async function onCommitAction(payload: { action: "diff" | "diffAll" | "resolve"; path: string }) {
+  if (payload.action === "resolve") {
+    await openConflictResolver(payload.path || commitTarget.value || activeWorkspace.value?.path || "", payload.path || "");
+    return;
+  }
   if (payload.action === "diffAll") {
     const root = payload.path || commitTarget.value || activeWorkspace.value?.path || "";
     if (!root) return;
@@ -1697,12 +1790,16 @@ function onGlobalKeydown(e: KeyboardEvent) {
       closeContext();
       return;
     }
+    if (conflictOpen.value && !busy.value) {
+      conflictOpen.value = false;
+      return;
+    }
     if (modalType.value && !busy.value && !progress.value.running) {
       modalType.value = null;
       return;
     }
   }
-  if (modalType.value) return;
+  if (modalType.value || conflictOpen.value) return;
   const mod = e.metaKey || e.ctrlKey;
   if (!mod) return;
 
@@ -1735,6 +1832,11 @@ function onGlobalKeydown(e: KeyboardEvent) {
     e.preventDefault();
     void openHistoryDialog();
     return;
+  }
+  // ⌘⇧K 解决冲突
+  if (e.key.toLowerCase() === "k" && e.shiftKey) {
+    e.preventDefault();
+    void openConflictResolver(activeWorkspace.value?.path || currentPath.value || "");
   }
 }
 
@@ -1818,6 +1920,7 @@ onUnmounted(() => {
       @update="onToolbarUpdate"
       @commit="onToolbarCommit"
       @changes="openChangesDialog()"
+      @conflicts="openConflictResolver(activeWorkspace?.path || currentPath || '')"
       @history="openHistoryDialog()"
       @copied="toast('已复制路径', 'success')"
       @copy-failed="(msg) => toast(msg || '复制失败', 'error')"
@@ -1894,6 +1997,14 @@ onUnmounted(() => {
       @history-view-path="onHistoryViewPath"
       @history-view-revision="onHistoryViewRevision"
       @refresh-history="refreshHistoryDialog"
+    />
+
+    <ConflictResolver
+      :open="conflictOpen"
+      :root="conflictRoot"
+      :focus="conflictFocus"
+      @close="conflictOpen = false"
+      @changed="onConflictsChanged"
     />
 
     <div v-if="diffViewerOpen" class="diff-overlay">

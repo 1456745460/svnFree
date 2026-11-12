@@ -25,6 +25,7 @@ const emit = defineEmits<{
   diff: [path: string];
   reveal: [path: string];
   revert: [path: string];
+  resolve: [path: string];
 }>();
 
 const rows = computed(() => flattenChangeTree(buildChangeTree(props.items, props.root), props.collapsed));
@@ -150,7 +151,14 @@ function rowTitle(node: ChangeTreeNode) {
       </span>
     </span>
 
-    <div v-if="row.node.item && showActions(row)" class="changes-actions" @click.stop>
+    <div v-if="row.node.item && (showActions(row) || row.node.item.status === 'C')" class="changes-actions" @click.stop>
+      <button
+        v-if="row.node.item.status === 'C'"
+        type="button"
+        class="btn btn-ghost tiny-btn"
+        :disabled="busy"
+        @click="emit('resolve', row.node.item.path)"
+      >解决</button>
       <button
         v-if="mode === 'changes' || canDiffItem(row.node.item)"
         type="button"

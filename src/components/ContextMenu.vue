@@ -192,7 +192,7 @@ const canRevert = computed(() => {
   if (multi.value) return true;
   return canRevertSvnStatus(props.entry?.svnStatus);
 });
-const canResolved = computed(() => !multi.value && statusCode.value === "C");
+const canResolved = computed(() => statusCode.value === "C");
 const canBlame = computed(() => !multi.value && !props.entry?.isDir);
 const canLock = computed(() => !multi.value ? !props.entry?.isDir : true);
 const canUnlock = computed(() => canLock.value);
@@ -244,7 +244,7 @@ const statusLabel = computed(() => {
       <button v-if="canUnlock" type="button" @click="actFile('unlock', $event)">解锁</button>
       <button v-if="canClean" type="button" @click="actFile('clean', $event)">清理 (Clean)</button>
       <button v-if="canRename" type="button" @click="actFile('rename', $event)">重命名...</button>
-      <button v-if="canResolved" type="button" @click="actFile('resolved', $event)">标记为已解决</button>
+      <button v-if="canResolved" type="button" @click="actFile('resolved', $event)">解决冲突...</button>
       <button v-if="canRevert" type="button" class="danger" @click="actFile('revert', $event)">还原</button>
       <button type="button" class="danger" @click="actFile('localDelete', $event)">本地删除</button>
       <button type="button" class="danger" @click="actFile('svnDelete', $event)">SVN 删除</button>
@@ -254,6 +254,7 @@ const statusLabel = computed(() => {
       <div class="context-menu-caption">工作副本 · {{ workspace?.name }}</div>
       <button type="button" @click="actWs('update', $event)">更新 <span class="kbd">⌘U</span></button>
       <button type="button" @click="actWs('commit', $event)">提交... <span class="kbd">⌘↩</span></button>
+      <button type="button" @click="actWs('conflicts', $event)">解决冲突...</button>
       <button type="button" @click="actWs('diff', $event)">查看差异 (DIFF)</button>
       <button type="button" @click="actWs('patch', $event)">导出补丁 (Patch)</button>
       <button type="button" @click="actWs('log', $event)">查看历史</button>

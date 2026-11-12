@@ -148,6 +148,21 @@ fn svn_resolved(path: String) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
+fn svn_list_conflicts(path: String) -> Result<Vec<svn::ConflictItem>, String> {
+    svn::list_conflicts(path)
+}
+
+#[tauri::command]
+fn svn_conflict_detail(path: String) -> Result<svn::ConflictDetail, String> {
+    svn::conflict_detail(path)
+}
+
+#[tauri::command]
+fn svn_resolve_conflict(path: String, accept: String) -> Result<CommandResult, String> {
+    svn::resolve_conflict(path, accept)
+}
+
+#[tauri::command]
 fn svn_lock(paths: Vec<String>, message: Option<String>) -> Result<CommandResult, String> {
     if paths.is_empty() {
         return Err("没有可锁定的路径".into());
@@ -299,6 +314,9 @@ pub fn run() {
             svn_add,
             svn_ignore,
             svn_resolved,
+            svn_list_conflicts,
+            svn_conflict_detail,
+            svn_resolve_conflict,
             svn_lock,
             svn_unlock,
             svn_switch,

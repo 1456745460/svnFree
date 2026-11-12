@@ -714,35 +714,87 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     (weird as f64 / sample.len() as f64) < 0.05
 }
 
+fn is_svn_status_column(index: usize, ch: char) -> bool {
+    match index {
+        0 => matches!(ch, ' ' | 'A' | 'C' | 'D' | 'I' | 'M' | 'R' | 'X' | '?' | '!' | '~'),
+        1 => matches!(ch, ' ' | 'C' | 'M'),
+        2 => matches!(ch, ' ' | 'L'),
+        3 => matches!(ch, ' ' | '+'),
+        4 => matches!(ch, ' ' | 'S'),
+        5 => matches!(ch, ' ' | 'K' | 'O' | 'T' | 'B'),
+        6 => matches!(ch, ' ' | 'C'),
+        _ => false,
+    }
+}
+
+/// svn status 前 7 列是固定标记，第 8 列为空格，之后才是路径。
+/// 返回 (内容列, 属性列, 树冲突列, 路径)。按字符切，避免中文路径被字节下标截断。
+fn split_status_line(line: &str) -> Option<(char, char, char, String)> {
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() < 9 || (chars[7] != ' ' && chars[7] != '\t') {
+        return None;
+    }
+    if !(0..7).all(|i| is_svn_status_column(i, chars[i])) {
+        return None;
+    }
+    let path = normalize_svn_text(&chars[8..].iter().collect::<String>().trim().to_string());
+    if path.is_empty() || path.starts_with("Performing status") {
+        return None;
+    }
+    Some((chars[0], chars[1], chars[6], path))
+}
+
+/// 内容、属性、树冲突任一列为 C 时，界面统一显示为冲突，避免树冲突被当成普通修改。
+fn status_display_code(content: char, prop: char, tree: char) -> Option<String> {
+    if content == 'C' || prop == 'C' || tree == 'C' {
+        return Some("C".into());
+    }
+    if content != ' ' && content != '\t' {
+        return Some(content.to_string());
+    }
+    if prop != ' ' {
+        return Some(prop.to_string());
+    }
+    None
+}
+
+fn conflict_kind_label(text: bool, property: bool, tree: bool) -> String {
+    let mut parts = Vec::new();
+    if text {
+        parts.push("文本冲突");
+    }
+    if property {
+        parts.push("属性冲突");
+    }
+    if tree {
+        parts.push("树冲突");
+    }
+    if parts.is_empty() {
+        "冲突".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 fn parse_status_map(stdout: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in stdout.lines() {
-        let line = line.trim_end();
-        if line.is_empty() {
+        let Some((content, prop, tree, path_part)) = split_status_line(line) else {
             continue;
-        }
-        // svn status uses fixed first 8 columns, then path.
-        // Use char-based slicing so non-ASCII paths do not break.
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() < 9 {
+        };
+        let Some(code) = status_display_code(content, prop, tree) else {
             continue;
-        }
-        let code = chars[0];
-        if code == ' ' || code == '\t' {
-            continue;
-        }
-        let path_part: String =
-            normalize_svn_text(&chars[8..].iter().collect::<String>().trim().to_string());
-        if path_part.is_empty() {
-            continue;
-        }
-        // Prefer bare file/dir name for matching current directory listing.
+        };
         let name = Path::new(&path_part)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(path_part.as_str())
             .to_string();
-        map.insert(name, code.to_string());
+        map.insert(name, code);
     }
     map
 }
@@ -891,15 +943,17 @@ fn status_of(path: &str) -> Result<Option<String>, String> {
         .to_string();
     let res = run_svn(&["status", "--depth=empty", &name], Some(&parent))?;
     for line in res.stdout.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
+        let Some((content, prop, tree, path_part)) = split_status_line(line) else {
+            continue;
+        };
+        let file_name = Path::new(&path_part)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path_part.as_str());
+        if file_name != name && path_part != name {
             continue;
         }
-        let code = chars[0];
-        if code == ' ' {
-            continue;
-        }
-        return Ok(Some(code.to_string()));
+        return Ok(status_display_code(content, prop, tree));
     }
     Ok(None)
 }
@@ -908,31 +962,12 @@ fn status_of(path: &str) -> Result<Option<String>, String> {
 fn parse_status_items(stdout: &str, cwd: &Path) -> Vec<SvnStatusItem> {
     let mut items = Vec::new();
     for line in stdout.lines() {
-        let line = line.trim_end();
-        if line.is_empty() {
+        let Some((content, prop, tree, path_part)) = split_status_line(line) else {
             continue;
-        }
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() < 9 {
+        };
+        let Some(status) = status_display_code(content, prop, tree) else {
             continue;
-        }
-        let code = chars[0];
-        // property-only 变更（第一列为空白，第二列有标记）
-        if code == ' ' {
-            let prop = chars.get(1).copied().unwrap_or(' ');
-            if prop == ' ' {
-                continue;
-            }
-        }
-        let path_part: String =
-            normalize_svn_text(&chars[8..].iter().collect::<String>().trim().to_string());
-        if path_part.is_empty() {
-            continue;
-        }
-        // 跳过状态汇总类行
-        if path_part.starts_with("Performing status") {
-            continue;
-        }
+        };
         let full = {
             let candidate = PathBuf::from(&path_part);
             if candidate.is_absolute() {
@@ -952,14 +987,6 @@ fn parse_status_items(stdout: &str, cwd: &Path) -> Vec<SvnStatusItem> {
             .strip_prefix(cwd)
             .map(|r| r.to_string_lossy().to_string())
             .unwrap_or_else(|_| path_part.clone());
-        let status = if code == ' ' {
-            chars
-                .get(1)
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "M".into())
-        } else {
-            code.to_string()
-        };
         items.push(SvnStatusItem {
             path: full_str,
             name,
@@ -970,7 +997,6 @@ fn parse_status_items(stdout: &str, cwd: &Path) -> Vec<SvnStatusItem> {
     }
     items
 }
-
 fn path_file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2587,6 +2613,579 @@ pub fn diff_file_content(path: String) -> Result<DiffFileContent, String> {
     })
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictItem {
+    pub path: String,
+    pub name: String,
+    pub relative_path: String,
+    pub is_dir: bool,
+    pub text: bool,
+    pub property: bool,
+    pub tree: bool,
+    pub kind_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictSide {
+    pub available: bool,
+    pub binary: bool,
+    pub text: String,
+    pub source: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictDetail {
+    pub path: String,
+    pub name: String,
+    pub relative_path: String,
+    pub is_dir: bool,
+    pub text: bool,
+    pub property: bool,
+    pub tree: bool,
+    pub kind_label: String,
+    pub summary: String,
+    pub mine: ConflictSide,
+    pub theirs: ConflictSide,
+    pub base: ConflictSide,
+    pub working: ConflictSide,
+    pub property_text: Option<String>,
+}
+
+fn join_status_path(cwd: &Path, path_part: &str) -> PathBuf {
+    let candidate = PathBuf::from(path_part);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        cwd.join(path_part)
+    }
+}
+
+fn svn_status_output(path: &Path, depth: &str) -> Result<(String, PathBuf), String> {
+    if !path.exists() {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| format!("路径不存在: {}", path.display()))?;
+        if !parent.exists() {
+            return Err(format!("路径不存在: {}", path.display()));
+        }
+        let name = path_file_name(path);
+        let res = run_svn(&["status", &format!("--depth={depth}"), &name], Some(parent))?;
+        if !res.success && res.stdout.trim().is_empty() {
+            return Err(if res.stderr.trim().is_empty() {
+                "获取 SVN 状态失败".into()
+            } else {
+                res.stderr
+            });
+        }
+        return Ok((res.stdout, parent.to_path_buf()));
+    }
+
+    if path.is_file() {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "无法解析父目录".to_string())?;
+        let name = path_file_name(path);
+        let res = run_svn(&["status", "--depth=empty", &name], Some(parent))?;
+        if !res.success && res.stdout.trim().is_empty() {
+            return Err(if res.stderr.trim().is_empty() {
+                "获取 SVN 状态失败".into()
+            } else {
+                res.stderr
+            });
+        }
+        return Ok((res.stdout, parent.to_path_buf()));
+    }
+
+    let is_wc_root = path.join(".svn").exists();
+    if is_wc_root {
+        let res = run_svn(&["status", &format!("--depth={depth}"), "."], Some(path))?;
+        if !res.success && res.stdout.trim().is_empty() {
+            return Err(if res.stderr.trim().is_empty() {
+                "获取 SVN 状态失败".into()
+            } else {
+                res.stderr
+            });
+        }
+        return Ok((res.stdout, path.to_path_buf()));
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "无法解析父目录".to_string())?;
+    let name = path_file_name(path);
+    let res = run_svn(
+        &["status", &format!("--depth={depth}"), &name],
+        Some(parent),
+    )?;
+    if !res.success && res.stdout.trim().is_empty() {
+        return Err(if res.stderr.trim().is_empty() {
+            "获取 SVN 状态失败".into()
+        } else {
+            res.stderr
+        });
+    }
+    Ok((res.stdout, parent.to_path_buf()))
+}
+
+pub fn list_conflicts(path: String) -> Result<Vec<ConflictItem>, String> {
+    let target = PathBuf::from(path.trim());
+    if target.as_os_str().is_empty() {
+        return Err("路径不能为空".into());
+    }
+    let (stdout, cwd) = svn_status_output(&target, "infinity")?;
+    let mut items = Vec::new();
+    for line in stdout.lines() {
+        let Some((content, prop, tree, path_part)) = split_status_line(line) else {
+            continue;
+        };
+        let text = content == 'C';
+        let property = prop == 'C';
+        let tree_conflict = tree == 'C';
+        if !text && !property && !tree_conflict {
+            continue;
+        }
+        let full = join_status_path(&cwd, &path_part);
+        let name = full
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path_part.as_str())
+            .to_string();
+        let relative = full
+            .strip_prefix(&cwd)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path_part.replace('\\', "/"));
+        items.push(ConflictItem {
+            path: full.to_string_lossy().to_string(),
+            name,
+            relative_path: relative,
+            is_dir: full.is_dir(),
+            text,
+            property,
+            tree: tree_conflict,
+            kind_label: conflict_kind_label(text, property, tree_conflict),
+        });
+    }
+    items.sort_by(|a, b| {
+        a.relative_path
+            .to_lowercase()
+            .cmp(&b.relative_path.to_lowercase())
+    });
+    items.dedup_by(|a, b| a.path == b.path);
+    Ok(items)
+}
+
+struct InfoConflictParts {
+    prev_base: String,
+    prev_wc: String,
+    cur_base: String,
+    prop_file: String,
+    summary: String,
+}
+
+fn strip_info_value(line: &str, prefix: &str) -> Option<String> {
+    let rest = line.strip_prefix(prefix)?.trim();
+    if rest.is_empty() || rest == "(none)" || rest.eq_ignore_ascii_case("none") {
+        Some(String::new())
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn push_unique(out: &mut Vec<&'static str>, hint: &'static str) {
+    if !out.contains(&hint) {
+        out.push(hint);
+    }
+}
+
+fn humanize_conflict_summary(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_lowercase();
+    let mut hints = Vec::new();
+    if lower.contains("incoming") && lower.contains("delete") {
+        push_unique(&mut hints, "对方已删除");
+    }
+    if lower.contains("incoming") && (lower.contains("edit") || lower.contains("modif")) {
+        push_unique(&mut hints, "对方有修改");
+    }
+    if lower.contains("incoming") && lower.contains("add") {
+        push_unique(&mut hints, "对方有新增");
+    }
+    if lower.contains("incoming") && lower.contains("replace") {
+        push_unique(&mut hints, "对方替换了此项");
+    }
+    if lower.contains("local") && (lower.contains("edit") || lower.contains("modif")) {
+        push_unique(&mut hints, "本地也有修改");
+    }
+    if lower.contains("local") && (lower.contains("delete") || lower.contains("missing")) {
+        push_unique(&mut hints, "本地已删除或缺失");
+    }
+    if lower.contains("local") && lower.contains("add") {
+        push_unique(&mut hints, "本地有新增");
+    }
+    if lower.contains("obstruct") {
+        push_unique(&mut hints, "本地存在同名障碍");
+    }
+    if lower.contains("upon update") {
+        push_unique(&mut hints, "发生在更新");
+    } else if lower.contains("upon merge") {
+        push_unique(&mut hints, "发生在合并");
+    } else if lower.contains("upon switch") {
+        push_unique(&mut hints, "发生在切换");
+    }
+    if hints.is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}\n（{}）", hints.join("，"))
+    }
+}
+
+fn parse_info_conflict(text: &str) -> InfoConflictParts {
+    let mut prev_base = String::new();
+    let mut prev_wc = String::new();
+    let mut cur_base = String::new();
+    let mut prop_file = String::new();
+    let mut lines_out = Vec::new();
+    for raw in text.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = strip_info_value(trimmed, "Conflict Previous Base File:") {
+            prev_base = value;
+            continue;
+        }
+        if let Some(value) = strip_info_value(trimmed, "Conflict Previous Working File:") {
+            prev_wc = value;
+            continue;
+        }
+        if let Some(value) = strip_info_value(trimmed, "Conflict Current Base File:") {
+            cur_base = value;
+            continue;
+        }
+        if let Some(value) = strip_info_value(trimmed, "Conflict Properties File:") {
+            prop_file = value;
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if lower.contains("conflict")
+            || lower.starts_with("source ")
+            || lower.contains("incoming")
+            || lower.contains("local file")
+            || lower.contains("local dir")
+            || lower.contains("local add")
+            || lower.contains("local delete")
+            || lower.contains("local edit")
+            || lower.contains("local missing")
+            || lower.contains("local obstruction")
+        {
+            lines_out.push(trimmed.to_string());
+        }
+    }
+    InfoConflictParts {
+        prev_base,
+        prev_wc,
+        cur_base,
+        prop_file,
+        summary: humanize_conflict_summary(&lines_out.join("\n")),
+    }
+}
+
+fn artifact_path(target: &Path, raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let given = PathBuf::from(raw);
+    let mut candidates = Vec::new();
+    if given.is_absolute() {
+        candidates.push(given.clone());
+    }
+    if let Some(parent) = target.parent() {
+        candidates.push(parent.join(&given));
+        if let Some(name) = given.file_name() {
+            candidates.push(parent.join(name));
+        }
+    }
+    candidates.push(given);
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn guess_conflict_artifacts(target: &Path) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let Some(parent) = target.parent() else {
+        return (None, None, None);
+    };
+    let Some(name) = target.file_name().and_then(|s| s.to_str()) else {
+        return (None, None, None);
+    };
+    let mine_path = parent.join(format!("{name}.mine"));
+    let mine = mine_path.is_file().then_some(mine_path);
+    let mut revs: Vec<(u64, PathBuf)> = Vec::new();
+    let prefix = format!("{name}.r");
+    if let Ok(rd) = fs::read_dir(parent) {
+        for ent in rd.flatten() {
+            let fname = ent.file_name().to_string_lossy().to_string();
+            if let Some(rest) = fname.strip_prefix(&prefix) {
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = rest.parse::<u64>() {
+                        if ent.path().is_file() {
+                            revs.push((n, ent.path()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    revs.sort_by_key(|item| item.0);
+    let base = if revs.len() >= 2 {
+        Some(revs[0].1.clone())
+    } else {
+        None
+    };
+    let theirs = revs.last().map(|item| item.1.clone());
+    (mine, theirs, base)
+}
+
+fn pick_artifact(target: &Path, specified: &str, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(found) = artifact_path(target, specified) {
+        return Some(found);
+    }
+    fallback.filter(|p| p.is_file())
+}
+
+fn side_from_file(path: Option<PathBuf>, dir_conflict: bool, empty_message: &str) -> ConflictSide {
+    if dir_conflict {
+        return ConflictSide {
+            available: false,
+            binary: false,
+            text: String::new(),
+            source: path
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            message: Some(
+                "目录没有可对比的文本内容。请根据说明选择保留本地、采用对方，或保留当前状态。"
+                    .into(),
+            ),
+        };
+    }
+    let Some(path) = path else {
+        return ConflictSide {
+            available: false,
+            binary: false,
+            text: String::new(),
+            source: String::new(),
+            message: Some(empty_message.to_string()),
+        };
+    };
+    let source = path.to_string_lossy().to_string();
+    if !path.is_file() {
+        return ConflictSide {
+            available: false,
+            binary: false,
+            text: String::new(),
+            source,
+            message: Some(empty_message.to_string()),
+        };
+    }
+    let meta = match fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            return ConflictSide {
+                available: false,
+                binary: false,
+                text: String::new(),
+                source,
+                message: Some(format!("读取失败: {e}")),
+            };
+        }
+    };
+    if meta.len() > 1024 * 1024 {
+        return ConflictSide {
+            available: false,
+            binary: true,
+            text: String::new(),
+            source,
+            message: Some("文件超过 1MB，不展示文本。仍可以直接选择这一侧。".into()),
+        };
+    }
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return ConflictSide {
+                available: false,
+                binary: false,
+                text: String::new(),
+                source,
+                message: Some(format!("读取失败: {e}")),
+            };
+        }
+    };
+    if bytes_look_binary(&bytes) {
+        return ConflictSide {
+            available: false,
+            binary: true,
+            text: String::new(),
+            source,
+            message: Some("二进制文件，无法展示文本对比。仍可以直接选择这一侧。".into()),
+        };
+    }
+    ConflictSide {
+        available: true,
+        binary: false,
+        text: bytes_to_diff_text(&bytes),
+        source,
+        message: None,
+    }
+}
+
+fn read_property_conflict(path: Option<PathBuf>) -> Option<String> {
+    let path = path?;
+    let meta = fs::metadata(&path).ok()?;
+    if !path.is_file() || meta.len() > 256 * 1024 {
+        return Some("属性冲突文件过大或不可读".into());
+    }
+    let bytes = fs::read(&path).ok()?;
+    if bytes_look_binary(&bytes) {
+        return Some("属性冲突文件不是文本".into());
+    }
+    Some(bytes_to_diff_text(&bytes))
+}
+
+fn conflict_flags_for(path: &Path) -> Result<(bool, bool, bool, bool), String> {
+    let (stdout, cwd) = svn_status_output(path, "empty")?;
+    let target_name = path_file_name(path);
+    for line in stdout.lines() {
+        let Some((content, prop, tree, path_part)) = split_status_line(line) else {
+            continue;
+        };
+        let full = join_status_path(&cwd, &path_part);
+        let name = full
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if full != path && name != target_name && path_part != target_name {
+            continue;
+        }
+        return Ok((content == 'C', prop == 'C', tree == 'C', full.is_dir()));
+    }
+    Ok((false, false, false, path.is_dir()))
+}
+
+pub fn conflict_detail(path: String) -> Result<ConflictDetail, String> {
+    let raw = path.trim();
+    if raw.is_empty() {
+        return Err("路径不能为空".into());
+    }
+    let target = PathBuf::from(raw);
+    let (text, property, tree, is_dir_flag) = conflict_flags_for(&target)?;
+    let is_dir = target.is_dir() || is_dir_flag;
+    let info_res = run_svn(&["info", raw], None)?;
+    if !info_res.success && info_res.stdout.trim().is_empty() {
+        return Err(if info_res.stderr.trim().is_empty() {
+            "读取冲突信息失败".into()
+        } else {
+            info_res.stderr
+        });
+    }
+    let info = parse_info_conflict(&info_res.stdout);
+    let (guess_mine, guess_theirs, guess_base) = if is_dir {
+        (None, None, None)
+    } else {
+        guess_conflict_artifacts(&target)
+    };
+    let mine_path = pick_artifact(&target, &info.prev_wc, guess_mine);
+    let theirs_path = pick_artifact(&target, &info.cur_base, guess_theirs);
+    let base_path = pick_artifact(&target, &info.prev_base, guess_base);
+    let working_path = target.is_file().then(|| target.clone());
+    let prop_path = artifact_path(&target, &info.prop_file);
+    let name = path_file_name(&target);
+    let kind = conflict_kind_label(text, property, tree);
+    let summary = if !text && !property && !tree {
+        "这个路径当前已经没有冲突。".into()
+    } else if info.summary.trim().is_empty() {
+        format!("{kind}。选择一侧版本后会清除冲突状态，然后才能提交。")
+    } else {
+        format!(
+            "{kind}\n{}\n选择一侧版本后会清除冲突状态，然后才能提交。",
+            info.summary.trim()
+        )
+    };
+    Ok(ConflictDetail {
+        path: target.to_string_lossy().to_string(),
+        name: name.clone(),
+        relative_path: name,
+        is_dir,
+        text,
+        property,
+        tree,
+        kind_label: kind,
+        summary,
+        mine: side_from_file(
+            mine_path,
+            is_dir,
+            "没有找到「我的版本」。仍可以直接让 SVN 按冲突记录采用我的版本。",
+        ),
+        theirs: side_from_file(
+            theirs_path,
+            is_dir,
+            "没有找到「对方版本」。仍可以直接让 SVN 按冲突记录采用对方版本。",
+        ),
+        base: side_from_file(base_path, is_dir, "没有找到冲突前的基准版本。"),
+        working: side_from_file(
+            working_path,
+            is_dir,
+            "工作副本里这个路径当前不存在。",
+        ),
+        property_text: read_property_conflict(prop_path),
+    })
+}
+
+pub fn resolve_conflict(path: String, accept: String) -> Result<CommandResult, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("路径不能为空".into());
+    }
+    let accept = accept.trim();
+    const ALLOWED: &[&str] = &[
+        "base",
+        "working",
+        "mine-conflict",
+        "theirs-conflict",
+        "mine-full",
+        "theirs-full",
+    ];
+    if !ALLOWED.contains(&accept) {
+        return Err("不支持的解决方式".into());
+    }
+    match run_svn(
+        &["resolve", "--accept", accept, "--depth", "empty", path],
+        None,
+    ) {
+        Ok(res) => Ok(res),
+        Err(err) if depth_flag_unsupported(&err) => {
+            run_svn(&["resolve", "--accept", accept, path], None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn depth_flag_unsupported(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("depth")
+        && (lower.contains("invalid option")
+            || lower.contains("unknown option")
+            || lower.contains("e205000"))
+}
+
+
 pub fn is_svn_working_copy(path: String) -> Result<bool, String> {
     let p = PathBuf::from(path);
     Ok(p.is_dir() && p.join(".svn").exists())
@@ -2618,5 +3217,66 @@ mod tests {
     fn decode_leaves_plain_utf8_paths() {
         let plain = "java/会员信息编辑页面角色对照.md";
         assert_eq!(decode_svn_unicode_escapes(plain), plain);
+    }
+
+    fn status_line(cols: &str, path: &str) -> String {
+        assert_eq!(cols.chars().count(), 7);
+        format!("{cols} {path}")
+    }
+
+    #[test]
+    fn status_line_detects_content_property_and_tree_conflicts() {
+        let (c, p, t, path) = split_status_line(&status_line("C      ", "src/App.vue")).unwrap();
+        assert_eq!((c, p, t, path.as_str()), ('C', ' ', ' ', "src/App.vue"));
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("C"));
+
+        let (c, p, t, path) = split_status_line(&status_line(" C     ", "src/App.vue")).unwrap();
+        assert_eq!((c, p, t), (' ', 'C', ' '));
+        assert_eq!(path, "src/App.vue");
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("C"));
+
+        let (c, p, t, path) = split_status_line(&status_line("      C", "src/目录")).unwrap();
+        assert_eq!((c, p, t), (' ', ' ', 'C'));
+        assert_eq!(path, "src/目录");
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("C"));
+
+        let (c, p, t, _) = split_status_line(&status_line("M     C", "src/dir")).unwrap();
+        assert_eq!((c, p, t), ('M', ' ', 'C'));
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("C"));
+
+        let (c, p, t, _) = split_status_line(&status_line("M      ", "src/ok.ts")).unwrap();
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("M"));
+
+        let (c, p, t, _) = split_status_line(&status_line(" M     ", "src/prop.ts")).unwrap();
+        assert_eq!(status_display_code(c, p, t).as_deref(), Some("M"));
+
+        assert!(split_status_line("Summary of conflicts:").is_none());
+        assert!(split_status_line("Updating '.':").is_none());
+        assert!(split_status_line("").is_none());
+    }
+
+    #[test]
+    fn parses_svn_info_conflict_sections() {
+        let sample = [
+            "Path: foo.txt",
+            "Conflict Previous Base File: foo.txt.r3",
+            "Conflict Previous Working File: foo.txt.mine",
+            "Conflict Current Base File: foo.txt.r8",
+            "Conflict Properties File: foo.txt.prej",
+            "Tree conflict: local file edit, incoming file delete or move upon update",
+            "  Source  left: (file) ^/trunk/foo.txt@3",
+            "  Source right: (none) ^/trunk/foo.txt@8",
+        ]
+        .join("\n");
+        let info = parse_info_conflict(&sample);
+        assert_eq!(info.prev_base, "foo.txt.r3");
+        assert_eq!(info.prev_wc, "foo.txt.mine");
+        assert_eq!(info.cur_base, "foo.txt.r8");
+        assert_eq!(info.prop_file, "foo.txt.prej");
+        assert!(info.summary.contains("Tree conflict"));
+        assert!(info.summary.contains("Source  left"));
+        assert!(info.summary.contains("对方已删除"));
+        assert!(info.summary.contains("本地也有修改"));
+        assert!(info.summary.contains("发生在更新"));
     }
 }
